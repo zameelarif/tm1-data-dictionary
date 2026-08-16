@@ -249,24 +249,68 @@ throughout: **build in the same shape we will ship in**, and **make good habits 
 
 ---
 
-# Current State (as of latest entry)
+# Part E — First Modules (the extractor begins)
 
-- Foundation complete and verified against a real local PA instance (467 processes to build against).
-- All scaffolding installed, tests passing, environment all-green.
-- **Next planned step:** write `config.py` — a validated config loader that becomes the single
-  source of connection + rules for every downstream module. Rationale: fail fast with clear errors
-  instead of cryptic crashes deep in the pipeline, and give every module one clean config object
-  to depend on.
+## E1. Pushed to GitHub + CI live
 
-## Planned build sequence (for context)
+- **What:** Linked the local repo to the pre-existing GitHub repo `zameelarif/tm1-data-dictionary`
+  and pushed `main`.
+- **Why:** Off-machine backup, and it activates GitHub Actions CI so every future push is
+  automatically linted and tested on clean Python 3.11/3.12/3.13 runners.
+- **How:** `git push -u origin main` (repo already existed, so no create step).
+- **Result:** 30 objects pushed; `main` now tracks `origin/main`. `.env` confirmed absent from the
+  remote. First commit checkpoint: `961a84f`.
 
-1. `config.py` — config loader + validation. *(next)*
-2. `tm1_client.py` — TM1py wrapper (connect, retry, throttle, dry-run switch).
-3. `models.py` — dataclasses that flow through the pipeline.
-4. `bootstrap.py` (first cube: `}Meta_Extraction_Audit`) — proves the write path end-to-end.
-5. Widen to more cubes, then the parser.
+## E2. Credential strategy decided (encrypted secrets, pluggable)
 
-Each step follows the same rhythm: **small module -> test -> commit -> repeat.**
+- **What:** Agreed that TM1 credentials should not live only in plaintext `.env` long-term; they
+  should be retrievable from an OS keyring (Windows Credential Manager) or, for enterprise clients,
+  a vault - selected per environment.
+- **Why:** Plaintext-on-disk is fine for local dev against a throwaway PA, but a security audit at a
+  client (Coles, Patties) would flag it. Different deployment targets need different backends: a
+  workstation suits keyring; an unattended server suits a scheduler-injected env var or a vault.
+- **Decision:** Design for it now via a `CredentialProvider` abstraction; implement the concrete
+  keyring provider shortly after the config backbone is in place. This costs nothing now and avoids a
+  painful refactor later - the same adapter-pattern thinking used for log ingestion in the spec.
+- **Result:** `credentials.py` created with a `CredentialProvider` interface and an
+  `EnvCredentialProvider` (env/.env) as the Phase 1 implementation. Keyring + `tm1dd set-credential`
+  scheduled as the next security step.
+
+## E3. `config.py` - the configuration backbone (first real module)
+
+- **What:** Built the configuration loader/validator: `config.py` plus its `credentials.py`
+  dependency and a 10-case unit test suite (`test_config.py`).
+- **Why:** Every downstream module (TM1 client, parser, writers) needs one trustworthy, validated
+  source of connection details and run settings. Centralising this means we **fail fast with a clear
+  message** if anything is missing, instead of crashing cryptically deep in the pipeline.
+- **Design choices:**
+  - **Option A (env-var indirection):** `config.yaml` names the env vars (e.g.
+    `address_env: TM1_ADDRESS`); actual values (and secrets) live in `.env`/environment. Keeps all
+    secrets consolidated outside the YAML and matches the existing config shape.
+  - **Minimal validation (for now):** required connection values must exist; port must be an integer
+    in 1-65535; `auth_mode` must be basic|cam|sso. Deeper validation (exclusion rules, schema) will
+    be added when the modules that consume them are built.
+  - **Frozen dataclasses:** `AppConfig`, `ConnectionConfig`, `RunConfig`, `LogConfig` are immutable,
+    so config can't be accidentally mutated mid-run.
+  - **Secrets via provider:** the password is fetched through the `CredentialProvider`, never read
+    directly - so swapping to keyring later touches nothing here.
+- **What the tests cover:** happy-path load; immutability; missing file; missing required env var;
+  missing password; non-integer port; out-of-range port; invalid auth_mode; a custom provider
+  supplying the password; and an empty YAML file. All ten pass.
+- **Toolchain note:** during development, `black`, `ruff`, and `mypy` were run before handover. mypy
+  caught an `int()` overload issue (passing `object` to `int()`), which was fixed by narrowing the
+  type in `_as_int` and explicitly rejecting `bool` (so `True` can't sneak through as `1`). This is
+  the toolchain earning its keep - a latent edge case caught before it could ship.
+- **Result:** `config.py` + `credentials.py` + `test_config.py` complete; 10/10 tests green; mypy and
+  black clean. This is the first real building block of the extractor.
+
+## Current State (updated)
+
+- Config backbone in place and fully tested. Secrets abstracted behind a provider, ready for a
+  keyring implementation next.
+- **Next planned step:** add the `keyring` credential provider + a `tm1dd set-credential` CLI command
+  so the PA password can be stored in Windows Credential Manager and removed from `.env`. Then
+  `tm1_client.py` (TM1py wrapper: connect, retry, throttle, dry-run) which will consume `AppConfig`.
 
 ---
 
