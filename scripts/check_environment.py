@@ -17,6 +17,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from tm1_data_dictionary.credentials import default_provider
+
 console = Console()
 _results: list[tuple[str, str, str]] = []
 
@@ -44,7 +46,7 @@ def check_config_files() -> dict | None:
         return None
     with open(cfg_path) as f:
         cfg: dict = yaml.safe_load(f) or {}
-    needed_env = ["TM1_ADDRESS", "TM1_PORT", "TM1_USER", "TM1_METADICT_PWD"]
+    needed_env = ["TM1_ADDRESS", "TM1_PORT", "TM1_USER"]
     missing = [v for v in needed_env if not os.getenv(v)]
     if missing:
         _record("Config files", False, f"missing env vars: {', '.join(missing)}")
@@ -65,7 +67,7 @@ def check_tm1_connection():  # noqa: ANN201
             port=int(os.getenv("TM1_PORT", "8010")),
             ssl=os.getenv("TM1_SSL", "true").lower() == "true",
             user=os.getenv("TM1_USER"),
-            password=os.getenv("TM1_METADICT_PWD"),
+            password=default_provider().get_secret("TM1_METADICT_PWD"),
             namespace=os.getenv("TM1_NAMESPACE") or None,
         )
         t0 = time.time()
