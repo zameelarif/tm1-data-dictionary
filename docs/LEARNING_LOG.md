@@ -42,6 +42,10 @@
 | 16 | `__init__` and `self` (constructors) | Python | Exercise 1 & 2 |
 | 17 | Polymorphism | Python | Exercise 1 (Q4) |
 | 18 | Indentation & tabs-vs-spaces | Python | Exercise 2 |
+| 19 | YAGNI ("You Aren't Gonna Need It") | Engineering | FileCredentialProvider decision |
+| 20 | venv auto-activation in VS Code | VS Code | daily startup |
+| 21 | Lazy imports | Python | `KeyringCredentialProvider` |
+| 22 | Composition (chaining objects) | Python | `ChainedCredentialProvider` |
 
 ---
 
@@ -177,9 +181,8 @@ with a clear message — this is the "fail fast, fail clearly" principle in acti
 nothing."
 
 **In our code:** `namespace: str | None = None` — a TM1 namespace might not apply (basic auth), so
-it's optional and defaults to `None`. Our helpers turn empty strings into `None` deliberately. In
-Exercise 2, `FileCredentialProvider` returns `None` when the file is missing, so a chain can fall
-back to the next provider.
+it's optional and defaults to `None`. Our helpers turn empty strings into `None` deliberately. Every
+provider returns `None` when it has no secret, so a chain can fall back to the next one.
 
 ---
 
@@ -249,7 +252,7 @@ except ValueError as exc:
 ```
 
 **In our code:** `_as_int` and `_build_connection` do exactly this — turn low-level errors into
-clear `ConfigError`s while keeping the original cause.
+clear `ConfigError`s while keeping the original cause. Also used in `set_keyring_secret`.
 
 ---
 
@@ -258,11 +261,11 @@ clear `ConfigError`s while keeping the original cause.
 **What:** A small function whose job is to *create and return* an object, hiding the details of
 which one. Callers ask the factory instead of constructing directly.
 
-**Why:** We can change *what* gets built (env provider today, keyring→env chain tomorrow) in one
-place, and no caller has to change.
+**Why:** We can change *what* gets built in one place, and no caller has to change.
 
-**In our code:** `default_provider()` returns the provider Phase 1 uses. Later it'll return a
-chained keyring→env provider — and `config.py` won't need a single edit.
+**In our code:** `default_provider()`. In Phase 1 it first returned a bare env provider; after the
+keyring upgrade it returns a **keyring→env chain** — and `config.py` did not change one line,
+because it only ever calls `default_provider()`. This is the payoff of the factory + ABC design.
 
 ---
 
@@ -277,9 +280,9 @@ def test_add():
     assert add(2, 3) == 5
 ```
 
-**In our code:** `test_config.py` has 10 tests — happy path plus every failure mode. They use a
-*temporary* config file and fake environment variables, so they need no real TM1 and never touch
-your real `.env`. `monkeypatch` safely sets/removes env vars just for one test.
+**In our code:** `test_config.py` (10 tests) and `test_credentials.py` (12 tests). They use
+*temporary* files, *fake* environment variables (`monkeypatch`), and a *fake* keyring, so they need
+no real TM1, no real keyring, and never touch your real `.env`.
 
 ---
 
@@ -291,23 +294,16 @@ you create an instance. Its job is to set the instance up with its starting data
 
 **Example:**
 ```python
-class StaticCredentialProvider(CredentialProvider):
-    def __init__(self, secret: str) -> None:
-        self._secret = secret          # remember 'secret' onto myself
-    def get_secret(self, name: str) -> str | None:
-        return self._secret            # use what I remembered
+class KeyringCredentialProvider(CredentialProvider):
+    def __init__(self, service_name: str = KEYRING_SERVICE_NAME) -> None:
+        self._service_name = service_name    # remember the service name onto myself
 ```
-Creating it: `p = StaticCredentialProvider("hunter2")` → Python calls `__init__("hunter2")`, which
-stores `"hunter2"` in `self._secret`.
 
 **Rule of thumb:** a class needs `__init__` when each instance must carry its own data.
-`EnvCredentialProvider` has **no** `__init__` (nothing to remember — it reads the env every time);
-`StaticCredentialProvider` and `FileCredentialProvider` **do** (they must remember a secret / a
-file path). Also: a `@dataclass` writes `__init__` for you, which is why our config classes didn't
-need one by hand.
-
-**Leading underscore** (`_secret`, `_file_path`) is a convention meaning "internal — don't touch
-from outside." (Learned in Exercises 1 & 2.)
+`EnvCredentialProvider` has **no** `__init__` (nothing to remember); `KeyringCredentialProvider`
+and `ChainedCredentialProvider` **do** (they remember a service name / a list of providers). Also:
+a `@dataclass` writes `__init__` for you. Leading underscore (`_service_name`) means "internal."
+(Learned in Exercises 1 & 2; reused in the keyring build.)
 
 ---
 
@@ -317,8 +313,8 @@ from outside." (Learned in Exercises 1 & 2.)
 *actual object's* version — even if that shared code was written before the object's class existed.
 
 **In our code:** `require_secret` is written once in the base `CredentialProvider`. When it calls
-`self.get_secret(...)`, it runs whichever provider's `get_secret` is actually in play — env, static,
-file, keyring. That's why we write the shared logic once and it "just works" for every provider.
+`self.get_secret(...)`, it runs whichever provider's `get_secret` is actually in play — env, keyring,
+chained. That's why we write the shared logic once and it "just works" for every provider.
 (Discovered in Exercise 1 Q4.)
 
 ---
@@ -330,18 +326,65 @@ indent run in sequence; indented lines are "inside" the block above them. There 
 
 **Two golden rules:**
 1. **Put lines at the right level.** A `return` that should run *after* an `if` must be at the same
-   indent as the `if`, not inside it:
-   ```python
-   if not path.exists():
-       return None          # inside the if
-   return path.read_text()  # OUTSIDE the if — runs when file exists
-   ```
-2. **Never mix tabs and spaces.** Python rejects it (`TabError`/`IndentationError`). Use **spaces**
-   (4 per level, the standard). VS Code inserts spaces on Tab for `.py` files, and `black` fixes
-   indentation automatically on commit — so the tools protect you here.
+   indent as the `if`, not inside it.
+2. **Never mix tabs and spaces.** Python rejects it. Use **spaces** (4 per level). VS Code inserts
+   spaces on Tab for `.py` files, and `black` fixes indentation automatically on commit.
 
-**In our code:** surfaced while writing `FileCredentialProvider` in Exercise 2 — the final `return`
-was accidentally trapped inside the `if`, and a tab had crept in among the spaces.
+**In our code:** surfaced while writing `FileCredentialProvider` in Exercise 2.
+
+---
+
+## 19. YAGNI ("You Aren't Gonna Need It")
+
+**What:** A design discipline — *don't build features speculatively*. Add code when a real need
+appears, not "just in case." Unused code is a cost, not a safety net.
+
+**In our code:** we wrote `FileCredentialProvider` as a *learning exercise* but chose **not** to keep
+it, because no environment we work with needs it. The `CredentialProvider` abstraction means we can
+add it in ~5 minutes *if* a client ever needs it — so deferring costs nothing.
+
+**Rule of thumb:** "might we need it?" is not enough. "Do we need it now?" is.
+
+---
+
+## 20. venv auto-activation in VS Code
+
+**What:** Because VS Code detected `.venv` as the project interpreter, it automatically activates the
+venv every time you open a new *integrated terminal* in this project (running `Set-ExecutionPolicy`
++ `Activate.ps1` for you). Confirm via the `(.venv)` prefix on the prompt.
+
+**Key nuance:** activation is always *per-shell*. A plain PowerShell window opened outside VS Code is
+**not** auto-activated — there you'd still run `.venv\Scripts\Activate.ps1` manually.
+
+**Daily routine now:** start local PA → open project in VS Code → open terminal → glance for
+`(.venv)` → work.
+
+---
+
+## 21. Lazy imports
+
+**What:** Importing a module *inside a function* instead of at the top of the file, so the import
+only happens when (and if) that code actually runs.
+
+**Why:** It lets a module load on machines that lack an optional dependency. The rest of the file
+still works; only the feature that truly needs the dependency will fail, and only if used.
+
+**In our code:** `KeyringCredentialProvider.get_secret` does `import keyring` inside the method. A
+headless server with no keyring backend can still import our `credentials.py` and use the env
+provider — keyring is only reached for if something actually asks the keyring provider for a secret.
+
+---
+
+## 22. Composition (chaining objects)
+
+**What:** Building behaviour by *combining* small, single-purpose objects, rather than making one big
+object that does everything. The combiner orchestrates; each part stays simple.
+
+**In our code:** `ChainedCredentialProvider` holds a *list* of other providers and tries them in
+order, returning the first secret found. Keyring and env stay simple and independent; the chain
+delivers the "keyring first, fall back to env" behaviour by composing them. `default_provider()`
+builds the chain. This is how we got graceful fallback with no extra complexity in any single
+provider.
 
 ---
 
