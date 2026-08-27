@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from tm1_data_dictionary import __version__
+from tm1_data_dictionary.bootstrap import ensure_schema
+from tm1_data_dictionary.config import ConfigError, load_config
 from tm1_data_dictionary.credentials import (
     KEYRING_SERVICE_NAME,
     CredentialError,
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.schema import audit_schema
+from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 
 
 @click.group()
@@ -62,6 +68,48 @@ def set_credential(name: str) -> None:
         raise click.ClickException(
             "The secret was written but could not be read back. Check your keyring backend."
         )
+
+
+@main.command()
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def bootstrap(config_path: str) -> None:
+    """Create the }Meta_* schema (dimensions and cubes) in the target TM1 instance.
+
+    Idempotent: objects that already exist are left untouched. Honours dry-run mode in
+    config (no changes are made if run.dry_run is true).
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    schema = audit_schema()
+    try:
+        with TM1Client(cfg) as client:
+            result = ensure_schema(client, schema)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Report what happened.
+    for name in result.dimensions_created:
+        click.echo(f"  created dimension  {name}")
+    for name in result.dimensions_skipped:
+        click.echo(f"  exists  dimension  {name}")
+    for name in result.cubes_created:
+        click.echo(f"  created cube       {name}")
+    for name in result.cubes_skipped:
+        click.echo(f"  exists  cube       {name}")
+
+    if result.created_anything:
+        click.echo("Bootstrap complete: schema created.")
+    else:
+        click.echo("Bootstrap complete: schema already present, nothing to do.")
 
 
 if __name__ == "__main__":
