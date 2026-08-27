@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -17,6 +18,7 @@ from tm1_data_dictionary.credentials import (
 )
 from tm1_data_dictionary.schema import audit_schema
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
+from tm1_data_dictionary.writers.audit_writer import AuditWriter
 
 
 @click.group()
@@ -110,6 +112,52 @@ def bootstrap(config_path: str) -> None:
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
+
+
+SCHEMA_VERSION = "1.1"
+
+
+@main.command(name="record-run")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--status",
+    default="Success",
+    show_default=True,
+    help="Exit status to record for this run.",
+)
+def record_run(config_path: str, status: str) -> None:
+    """Write one run record into }Meta_Extraction_Audit.
+
+    Useful for proving the write path end-to-end: it records a row with the current
+    extractor version, start/end time, and status. Honours dry-run mode in config.
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    start = datetime.now(UTC)
+    try:
+        with TM1Client(cfg) as client:
+            writer = AuditWriter(client)
+            record = writer.record_run(
+                extractor_version=__version__,
+                schema_version=SCHEMA_VERSION,
+                start_time=start,
+                exit_status=status,
+            )
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Recorded run {record.run_id}")
+    click.echo(f"  version {record.extractor_version}  schema {record.schema_version}")
+    click.echo(f"  duration {record.duration_seconds}s  status {record.exit_status}")
 
 
 if __name__ == "__main__":
