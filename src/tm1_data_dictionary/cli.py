@@ -16,6 +16,9 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.parser.blocks import code_lines
+from tm1_data_dictionary.parser.references import extract_references
+from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.schema import audit_schema
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
@@ -158,6 +161,130 @@ def record_run(config_path: str, status: str) -> None:
     click.echo(f"Recorded run {record.run_id}")
     click.echo(f"  version {record.extractor_version}  schema {record.schema_version}")
     click.echo(f"  duration {record.duration_seconds}s  status {record.exit_status}")
+
+
+@main.command(name="list-processes")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--contains", default="", help="Only show names containing this text (case-insensitive)."
+)
+def list_processes(config_path: str, contains: str) -> None:
+    """List TI process names in the instance (optionally filtered)."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    needle = contains.lower()
+    try:
+        with TM1Client(cfg) as client:
+            names = TIReader(client).list_process_names()
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    shown = [n for n in names if needle in n.lower()] if needle else names
+    for name in shown:
+        click.echo(name)
+    click.echo(f"({len(shown)} of {len(names)} processes)")
+
+
+@main.command(name="inspect-process")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def inspect_process(name: str, config_path: str) -> None:
+    """Print a summary of a single TI process (blocks, datasource, variables, parameters)."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Process: {ti.name}")
+    click.echo(f"  security access: {ti.has_security_access}")
+    ds = ti.datasource
+    click.echo(f"  datasource type: {ds.type}")
+    if ds.name_for_server:
+        click.echo(f"  source: {ds.name_for_server}")
+    if ds.type in {"ASCII", "CHARACTERDELIMITED"}:
+        click.echo(f"  delimiter: {ds.delimiter!r}  header rows: {ds.header_records}")
+
+    click.echo(f"  variables ({ti.variable_count}):")
+    for v in ti.variables:
+        click.echo(f"    {v.position:>2}  {v.name}  ({v.var_type})")
+
+    if ti.parameters:
+        click.echo(f"  parameters ({ti.parameter_count}):")
+        for p in ti.parameters:
+            click.echo(f"    {p.name}  ({p.param_type})  default={p.default_value!r}")
+
+    click.echo("  block line counts:")
+    for block_name, text in ti.iter_blocks():
+        lines = len(text.splitlines()) if text else 0
+        click.echo(f"    {block_name:<9} {lines} lines")
+
+
+@main.command(name="extract-refs")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def extract_refs(name: str, config_path: str) -> None:
+    """Extract and print the function references (lineage) from a single TI process."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    refs = extract_references(code_lines(ti))
+
+    click.echo(f"Process: {ti.name}")
+    click.echo(f"References found: {len(refs)}")
+    click.echo("")
+    click.echo(f"  {'BLOCK':<9} {'LINE':>4}  {'ROLE':<10} {'FUNCTION':<28} TARGET")
+    click.echo(f"  {'-' * 9} {'-' * 4}  {'-' * 10} {'-' * 28} {'-' * 20}")
+    for r in refs:
+        target = r.target if r.target_is_literal else f"({r.target})"
+        click.echo(f"  {r.block:<9} {r.line_no:>4}  {r.role.value:<10} {r.function:<28} {target}")
+
+    click.echo("")
+    counts: dict[str, int] = {}
+    for r in refs:
+        counts[r.role.value] = counts.get(r.role.value, 0) + 1
+    summary = "  ".join(f"{role}={n}" for role, n in sorted(counts.items()))
+    click.echo(f"Summary: {summary}" if summary else "Summary: no references found")
 
 
 if __name__ == "__main__":
