@@ -17,6 +17,7 @@ from tm1_data_dictionary.credentials import (
     set_keyring_secret,
 )
 from tm1_data_dictionary.parser.blocks import code_lines
+from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.schema import audit_schema
@@ -253,7 +254,11 @@ def inspect_process(name: str, config_path: str) -> None:
     help="Path to config.yaml.",
 )
 def extract_refs(name: str, config_path: str) -> None:
-    """Extract and print the function references (lineage) from a single TI process."""
+    """Extract and print the function references (lineage) from a single TI process.
+
+    Uses const-propagation so variable targets (e.g. cCube) are resolved to their
+    literal values (e.g. WeeklySales) where it is safe to do so.
+    """
     try:
         cfg = load_config(Path(config_path))
     except ConfigError as exc:
@@ -268,16 +273,24 @@ def extract_refs(name: str, config_path: str) -> None:
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    refs = extract_references(code_lines(ti))
+    lines = code_lines(ti)
+    const_table = build_const_table(lines)  # resolve cCube -> 'WeeklySales', etc.
+    refs = extract_references(lines, const_table=const_table)
 
     click.echo(f"Process: {ti.name}")
     click.echo(f"References found: {len(refs)}")
+    click.echo(f"Variables resolved by const-propagation: {len(const_table.values)}")
     click.echo("")
-    click.echo(f"  {'BLOCK':<9} {'LINE':>4}  {'ROLE':<10} {'FUNCTION':<28} TARGET")
-    click.echo(f"  {'-' * 9} {'-' * 4}  {'-' * 10} {'-' * 28} {'-' * 20}")
+    click.echo(f"  {'BLOCK':<9} {'LINE':>4}  {'ROLE':<10} {'FUNCTION':<20} TARGET")
+    click.echo(f"  {'-' * 9} {'-' * 4}  {'-' * 10} {'-' * 20} {'-' * 24}")
     for r in refs:
-        target = r.target if r.target_is_literal else f"({r.target})"
-        click.echo(f"  {r.block:<9} {r.line_no:>4}  {r.role.value:<10} {r.function:<28} {target}")
+        if r.target_is_literal:
+            target = r.target
+        elif r.resolved_target is not None:
+            target = f"{r.resolved_target} [={r.target}]"  # resolved from a variable
+        else:
+            target = f"({r.target})"  # still dynamic
+        click.echo(f"  {r.block:<9} {r.line_no:>4}  {r.role.value:<10} {r.function:<20} {target}")
 
     click.echo("")
     counts: dict[str, int] = {}

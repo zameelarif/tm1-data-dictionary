@@ -1,21 +1,4 @@
-"""Extract TI function references (the first genuine lineage pass).
-
-Given the comment-stripped :class:`~tm1_data_dictionary.parser.blocks.CodeLine`s of a
-process, this pass finds calls to the TI functions we care about - cube writes, cube
-reads, dimension updates, attribute writes, process chains, and external calls - and
-records, for each one:
-
-- the **function** called and the **role** it plays (write / read / chain / ...),
-- the top-level arguments and the parsed **first argument** (resolved when it is a plain
-  string literal),
-- the block and line number where it appears.
-
-Phase 1 starts with a *focused* set of the most common functions (below); the ``FUNCTIONS``
-registry is designed to grow. A function name is matched case-insensitively and only as a
-*whole word* immediately followed by ``(`` - so ``CellPutN(`` matches but ``MyCellPutN``
-does not. Argument extraction reads the balanced parentheses after the function name,
-respecting nested calls and single-quoted string literals (with ``''`` escapes).
-"""
+"""Extract TI function references (the first genuine lineage pass)."""
 
 from __future__ import annotations
 
@@ -24,13 +7,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 from tm1_data_dictionary.parser.blocks import CodeLine
+from tm1_data_dictionary.parser.const_prop import ConstTable
 
 QUOTE = "'"
 
 
 class Role(str, Enum):
-    """What a referenced function does, for lineage purposes."""
-
     CUBE_WRITE = "CubeWrite"
     CUBE_READ = "CubeRead"
     DIM_UPDATE = "DimUpdate"
@@ -39,59 +21,45 @@ class Role(str, Enum):
     EXTERNAL = "External"
 
 
-# The focused Phase-1 function set: name (lower-case) -> role. Grows in later steps.
 FUNCTIONS: dict[str, Role] = {
-    # cube writes
     "cellputn": Role.CUBE_WRITE,
     "cellputs": Role.CUBE_WRITE,
     "cellincrementn": Role.CUBE_WRITE,
-    # cube reads
     "db": Role.CUBE_READ,
     "dbrw": Role.CUBE_READ,
     "cellgetn": Role.CUBE_READ,
     "cellgets": Role.CUBE_READ,
-    # dimension updates
     "dimensionelementinsert": Role.DIM_UPDATE,
     "hierarchyelementinsert": Role.DIM_UPDATE,
     "dimensionelementcomponentadd": Role.DIM_UPDATE,
     "hierarchyelementcomponentadd": Role.DIM_UPDATE,
-    # attribute writes
     "attrputs": Role.ATTR_WRITE,
     "attrputn": Role.ATTR_WRITE,
     "elementattrputs": Role.ATTR_WRITE,
     "elementattrputn": Role.ATTR_WRITE,
-    # process chain
     "executeprocess": Role.CHAIN,
     "runprocess": Role.CHAIN,
-    # external
     "executecommand": Role.EXTERNAL,
     "asciioutput": Role.EXTERNAL,
 }
 
-# Matches a whole-word function name immediately followed by '('. Case-insensitive.
 _NAME_BEFORE_PAREN = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 @dataclass(frozen=True)
 class Reference:
-    """One extracted function reference."""
-
-    function: str  # the function name as written (original case)
+    function: str
     role: Role
     block: str
     line_no: int
-    args: tuple[str, ...]  # top-level arguments, trimmed (raw expressions)
-    target: str  # the first argument, unquoted if it was a literal
-    target_is_literal: bool  # True if the first arg was a plain string literal
-    raw: str  # the full "func(...)" text as matched
+    args: tuple[str, ...]
+    target: str
+    target_is_literal: bool
+    raw: str
+    resolved_target: str | None = None  # const-propagated value, if any
 
 
 def _extract_arg_string(text: str, open_paren_idx: int) -> tuple[str, int]:
-    """Return ``(inner, end_idx)`` for the balanced parens starting at ``open_paren_idx``.
-
-    Respects nested parens and single-quoted strings (with '' escapes). If unbalanced,
-    returns everything to the end and ``end_idx = len(text)``.
-    """
     depth = 0
     in_string = False
     i = open_paren_idx
@@ -119,7 +87,6 @@ def _extract_arg_string(text: str, open_paren_idx: int) -> tuple[str, int]:
 
 
 def _split_top_level_args(inner: str) -> list[str]:
-    """Split an argument string on top-level commas (ignoring nested parens/strings)."""
     args: list[str] = []
     depth = 0
     in_string = False
@@ -153,22 +120,27 @@ def _split_top_level_args(inner: str) -> list[str]:
                 current.append(ch)
         i += 1
     tail = "".join(current).strip()
-    if tail or args:  # keep a trailing arg; ignore an all-empty split
+    if tail or args:
         args.append(tail)
     return args
 
 
 def _as_literal(arg: str) -> tuple[str, bool]:
-    """If ``arg`` is a single quoted string literal, return (value, True); else (arg, False)."""
     a = arg.strip()
     if len(a) >= 2 and a[0] == QUOTE and a[-1] == QUOTE:
-        inner = a[1:-1].replace("''", "'")  # unescape doubled quotes
+        inner = a[1:-1].replace("''", "'")
         return inner, True
     return a, False
 
 
-def extract_references(lines: list[CodeLine]) -> list[Reference]:
-    """Scan code lines and return all recognised function references, in order."""
+def extract_references(
+    lines: list[CodeLine], const_table: ConstTable | None = None
+) -> list[Reference]:
+    """Scan code lines and return all recognised function references, in order.
+
+    If ``const_table`` is provided, a non-literal target that is a resolvable variable (or
+    simple concatenation) is resolved and stored in ``resolved_target``.
+    """
     refs: list[Reference] = []
     for line in lines:
         if line.is_blank:
@@ -179,11 +151,17 @@ def extract_references(lines: list[CodeLine]) -> list[Reference]:
             role = FUNCTIONS.get(name.lower())
             if role is None:
                 continue
-            open_idx = match.end() - 1  # index of '('
+            open_idx = match.end() - 1
             inner, end_idx = _extract_arg_string(text, open_idx)
             args = tuple(_split_top_level_args(inner))
             first = args[0] if args else ""
             target, is_literal = _as_literal(first)
+
+            resolved: str | None = None
+            if not is_literal and const_table is not None and first:
+                value, _conf = const_table.resolve_expression(first)
+                resolved = value
+
             refs.append(
                 Reference(
                     function=name,
@@ -194,6 +172,7 @@ def extract_references(lines: list[CodeLine]) -> list[Reference]:
                     target=target,
                     target_is_literal=is_literal,
                     raw=text[match.start() : end_idx + 1],
+                    resolved_target=resolved,
                 )
             )
     return refs
