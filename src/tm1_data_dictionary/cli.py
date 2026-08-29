@@ -16,6 +16,7 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.references import extract_references
@@ -298,6 +299,69 @@ def extract_refs(name: str, config_path: str) -> None:
         counts[r.role.value] = counts.get(r.role.value, 0) + 1
     summary = "  ".join(f"{role}={n}" for role, n in sorted(counts.items()))
     click.echo(f"Summary: {summary}" if summary else "Summary: no references found")
+
+
+@main.command(name="show-vars")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--all-assignments",
+    is_flag=True,
+    default=False,
+    help="Show every assignment (not just one summary line per variable).",
+)
+def show_vars(name: str, config_path: str, all_assignments: bool) -> None:
+    """Show the variable dictionary for a TI: every variable and where its value comes from.
+
+    Complements 'extract-refs': where const-propagation cannot safely resolve a variable
+    (e.g. cCube set from a cube read), this shows the raw assignment(s) so a developer can
+    trace it by hand.
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    variables = summarize_variables(code_lines(ti))
+
+    click.echo(f"Process: {ti.name}")
+    click.echo(f"Variables assigned in code: {len(variables)}")
+    click.echo("")
+
+    if all_assignments:
+        # Detailed: every assignment, in source order per variable.
+        click.echo(f"  {'VARIABLE':<24} {'BLOCK':<9} {'LINE':>4}  RHS")
+        click.echo(f"  {'-' * 24} {'-' * 9} {'-' * 4}  {'-' * 40}")
+        for info in variables.values():
+            for a in info.assignments:
+                cf = " *" if a.in_control_flow else ""
+                click.echo(f"  {a.name:<24} {a.block:<9} {a.line_no:>4}  {a.rhs}{cf}")
+        click.echo("")
+        click.echo("  (* = assigned inside an IF/WHILE block)")
+    else:
+        # Summary: one line per variable, showing where its value comes from.
+        click.echo(f"  {'VARIABLE':<24} {'#':>3}  {'CONST?':<6} DERIVED FROM")
+        click.echo(f"  {'-' * 24} {'-' * 3}  {'-' * 6} {'-' * 40}")
+        for info in variables.values():
+            const = "yes" if info.is_constant_literal else "no"
+            click.echo(
+                f"  {info.name:<24} {info.assignment_count:>3}  {const:<6} {info.derived_from}"
+            )
 
 
 if __name__ == "__main__":
