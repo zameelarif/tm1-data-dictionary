@@ -1,4 +1,19 @@
-"""Extract TI function references (the first genuine lineage pass)."""
+"""Extract TI function references (the first genuine lineage pass).
+
+Given the comment-stripped :class:`~tm1_data_dictionary.parser.blocks.CodeLine`s of a
+process, this pass finds calls to the TI functions we care about and records, for each,
+the function, its role, the block/line, the arguments, and - importantly - the **target**
+it acts on (the cube, dimension, or process).
+
+Different functions place the target in different argument positions. For example a cube
+*read* names the cube first (``CellGetN(cube, e1, e2, ...)``), while a cube *write* names
+the value first and the cube second (``CellPutN(value, cube, e1, e2, ...)``). The
+``TARGET_ARG_INDEX`` table records, per function, which argument is the target - so the
+extractor reports the *cube* for both reads and writes, not the value.
+
+When a const table is supplied, the chosen target argument is resolved through
+const-propagation (following variable chains), so ``cCube`` becomes ``Food_Weekly_Sales``.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +28,8 @@ QUOTE = "'"
 
 
 class Role(str, Enum):
+    """What a referenced function does, for lineage purposes."""
+
     CUBE_WRITE = "CubeWrite"
     CUBE_READ = "CubeRead"
     DIM_UPDATE = "DimUpdate"
@@ -21,6 +38,7 @@ class Role(str, Enum):
     EXTERNAL = "External"
 
 
+# name (lower-case) -> role.
 FUNCTIONS: dict[str, Role] = {
     "cellputn": Role.CUBE_WRITE,
     "cellputs": Role.CUBE_WRITE,
@@ -43,23 +61,50 @@ FUNCTIONS: dict[str, Role] = {
     "asciioutput": Role.EXTERNAL,
 }
 
+# name (lower-case) -> zero-based index of the argument holding the TARGET
+# (cube / dimension / process). Functions not listed default to 0.
+#
+#   CellGetN(cube, e1, ...)              -> cube is arg 0
+#   DB(cube, e1, ...)                    -> cube is arg 0
+#   CellPutN(value, cube, e1, ...)       -> cube is arg 1
+#   CellIncrementN(value, cube, e1, ...) -> cube is arg 1
+#   DimensionElementInsert(dim, hier, el, type) -> dim is arg 0
+#   AttrPutS(value, dim, el, attr)       -> dim is arg 1
+#   ExecuteProcess(process, p, v, ...)   -> process is arg 0
+TARGET_ARG_INDEX: dict[str, int] = {
+    # cube writes: value first, cube second
+    "cellputn": 1,
+    "cellputs": 1,
+    "cellincrementn": 1,
+    # attribute writes: value first, dimension second
+    "attrputs": 1,
+    "attrputn": 1,
+    "elementattrputs": 1,
+    "elementattrputn": 1,
+    # everything else defaults to 0 (cube/dim/process is the first argument)
+}
+
 _NAME_BEFORE_PAREN = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 @dataclass(frozen=True)
 class Reference:
-    function: str
+    """One extracted function reference."""
+
+    function: str  # the function name as written (original case)
     role: Role
     block: str
     line_no: int
-    args: tuple[str, ...]
-    target: str
-    target_is_literal: bool
-    raw: str
-    resolved_target: str | None = None  # const-propagated value, if any
+    args: tuple[str, ...]  # all top-level arguments, trimmed
+    target_arg_index: int  # which arg is the target (cube/dim/process)
+    target: str  # the target argument, unquoted if it was a literal
+    target_is_literal: bool  # True if the target argument was a plain string literal
+    raw: str  # the full "func(...)" text as matched
+    resolved_target: str | None = None  # const-propagated value of the target, if any
 
 
 def _extract_arg_string(text: str, open_paren_idx: int) -> tuple[str, int]:
+    """Return ``(inner, end_idx)`` for the balanced parens starting at ``open_paren_idx``."""
     depth = 0
     in_string = False
     i = open_paren_idx
@@ -87,6 +132,7 @@ def _extract_arg_string(text: str, open_paren_idx: int) -> tuple[str, int]:
 
 
 def _split_top_level_args(inner: str) -> list[str]:
+    """Split an argument string on top-level commas (ignoring nested parens/strings)."""
     args: list[str] = []
     depth = 0
     in_string = False
@@ -126,10 +172,10 @@ def _split_top_level_args(inner: str) -> list[str]:
 
 
 def _as_literal(arg: str) -> tuple[str, bool]:
+    """If ``arg`` is a single quoted string literal, return (value, True); else (arg, False)."""
     a = arg.strip()
     if len(a) >= 2 and a[0] == QUOTE and a[-1] == QUOTE:
-        inner = a[1:-1].replace("''", "'")
-        return inner, True
+        return a[1:-1].replace("''", "'"), True
     return a, False
 
 
@@ -138,8 +184,9 @@ def extract_references(
 ) -> list[Reference]:
     """Scan code lines and return all recognised function references, in order.
 
-    If ``const_table`` is provided, a non-literal target that is a resolvable variable (or
-    simple concatenation) is resolved and stored in ``resolved_target``.
+    The target argument is chosen per-function via ``TARGET_ARG_INDEX`` (so writes report
+    the cube, not the value). If ``const_table`` is given, a non-literal target that
+    resolves through const-propagation is stored in ``resolved_target``.
     """
     refs: list[Reference] = []
     for line in lines:
@@ -151,15 +198,18 @@ def extract_references(
             role = FUNCTIONS.get(name.lower())
             if role is None:
                 continue
-            open_idx = match.end() - 1
+
+            open_idx = match.end() - 1  # index of '('
             inner, end_idx = _extract_arg_string(text, open_idx)
             args = tuple(_split_top_level_args(inner))
-            first = args[0] if args else ""
-            target, is_literal = _as_literal(first)
+
+            target_idx = TARGET_ARG_INDEX.get(name.lower(), 0)
+            target_expr = args[target_idx] if target_idx < len(args) else ""
+            target, is_literal = _as_literal(target_expr)
 
             resolved: str | None = None
-            if not is_literal and const_table is not None and first:
-                value, _conf = const_table.resolve_expression(first)
+            if not is_literal and const_table is not None and target_expr:
+                value, _conf = const_table.resolve_expression(target_expr)
                 resolved = value
 
             refs.append(
@@ -169,6 +219,7 @@ def extract_references(
                     block=line.block,
                     line_no=line.line_no,
                     args=args,
+                    target_arg_index=target_idx,
                     target=target,
                     target_is_literal=is_literal,
                     raw=text[match.start() : end_idx + 1],
