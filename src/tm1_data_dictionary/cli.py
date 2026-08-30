@@ -20,10 +20,12 @@ from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.references import extract_references
+from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
-from tm1_data_dictionary.schema import audit_schema
+from tm1_data_dictionary.schema import audit_schema, process_cube_schema
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
+from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
 
 @click.group()
@@ -88,32 +90,31 @@ def set_credential(name: str) -> None:
 def bootstrap(config_path: str) -> None:
     """Create the }Meta_* schema (dimensions and cubes) in the target TM1 instance.
 
-    Idempotent: objects that already exist are left untouched. Honours dry-run mode in
-    config (no changes are made if run.dry_run is true).
+    Idempotent: objects that already exist are left untouched. Honours dry-run mode.
     """
     try:
         cfg = load_config(Path(config_path))
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    schema = audit_schema()
     try:
         with TM1Client(cfg) as client:
-            result = ensure_schema(client, schema)
+            r1 = ensure_schema(client, audit_schema())
+            r2 = ensure_schema(client, process_cube_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Report what happened.
-    for name in result.dimensions_created:
-        click.echo(f"  created dimension  {name}")
-    for name in result.dimensions_skipped:
-        click.echo(f"  exists  dimension  {name}")
-    for name in result.cubes_created:
-        click.echo(f"  created cube       {name}")
-    for name in result.cubes_skipped:
-        click.echo(f"  exists  cube       {name}")
+    for result in (r1, r2):
+        for name in result.dimensions_created:
+            click.echo(f"  created dimension  {name}")
+        for name in result.dimensions_skipped:
+            click.echo(f"  exists  dimension  {name}")
+        for name in result.cubes_created:
+            click.echo(f"  created cube       {name}")
+        for name in result.cubes_skipped:
+            click.echo(f"  exists  cube       {name}")
 
-    if result.created_anything:
+    if r1.created_anything or r2.created_anything:
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
@@ -362,6 +363,61 @@ def show_vars(name: str, config_path: str, all_assignments: bool) -> None:
             click.echo(
                 f"  {info.name:<24} {info.assignment_count:>3}  {const:<6} {info.derived_from}"
             )
+
+
+@main.command(name="extract-cube")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def extract_cube(name: str, config_path: str) -> None:
+    """Parse a TI's cube lineage and write it into }Meta_Process_Cube.
+
+    Honours dry-run mode in config (parses and reports, but writes nothing).
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+
+            lines = code_lines(ti)
+            const_table = build_const_table(lines)
+            refs = extract_references(lines, const_table=const_table)
+            result = rollup_cube_lineage(ti.name, refs)
+
+            # Report what we found.
+            click.echo(f"Process: {ti.name}")
+            click.echo(f"Cube-lineage rows: {len(result.rows)}")
+            for row in result.rows:
+                click.echo(
+                    f"  {row.role.value:<10} {row.cube:<28} "
+                    f"count={row.count}  first={row.first_block}:{row.first_line}"
+                )
+            if result.unresolved_count:
+                click.echo(
+                    f"  ({result.unresolved_count} cube references stayed dynamic "
+                    "and were not written)"
+                )
+
+            if client.dry_run:
+                click.echo("Dry-run: nothing written.")
+                return
+
+            written = write_cube_lineage(client, list(result.rows))
+            click.echo(f"Wrote {written} rows into }}Meta_Process_Cube.")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

@@ -72,6 +72,24 @@ class SchemaDef:
 DIM_EXTRACTION_RUN = "}Meta_ExtractionRun"
 DIM_AUDIT_MEASURE = "}Meta_AuditMeasure"
 CUBE_EXTRACTION_AUDIT = "}Meta_Extraction_Audit"
+DIM_PROCESS = "}Meta_Process"
+DIM_CUBE = "}Meta_Cube"
+DIM_ROLE = "}Meta_Role"
+DIM_PROCESS_CUBE_MEASURE = "}Meta_ProcessCubeMeasure"
+CUBE_PROCESS_CUBE = "}Meta_Process_Cube"
+
+# The roles the cube-lineage writer can record (seed elements for }Meta_Role).
+CUBE_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("CubeRead", STRING),
+    ElementDef("CubeWrite", STRING),
+)
+
+# Measures for }Meta_Process_Cube.
+PROCESS_CUBE_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),
+    ElementDef("FirstBlock", STRING),
+    ElementDef("FirstLine", NUMERIC),
+)
 
 # A harmless seed element so the run dimension (and therefore the cube) can be created
 # before any run has been recorded. Real run timestamps are added by the audit writer.
@@ -99,3 +117,25 @@ def audit_schema() -> SchemaDef:
         (DIM_EXTRACTION_RUN, DIM_AUDIT_MEASURE),
     )
     return SchemaDef(dimensions=(run_dim, measure_dim), cubes=(audit_cube,))
+
+
+def process_cube_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Cube and its key dimensions.
+
+    }Meta_Process and }Meta_Cube start empty (elements are added by the writer as
+    processes and cubes are discovered). }Meta_Role and the measure dimension are
+    seeded with their fixed elements. }Meta_Process_Cube is dimensioned
+    Process x Cube x Role x Measure.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    role_dim = DimensionDef(DIM_ROLE, CUBE_ROLE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_PROCESS_CUBE_MEASURE, PROCESS_CUBE_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_CUBE,
+        (DIM_PROCESS, DIM_CUBE, DIM_ROLE, DIM_PROCESS_CUBE_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, cube_dim, role_dim, measure_dim),
+        cubes=(cube,),
+    )
