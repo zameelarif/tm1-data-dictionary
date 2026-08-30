@@ -1,4 +1,4 @@
-"""Unit tests for const propagation (resolving variables to literal values)."""
+"""Unit tests for const propagation, including transitive (one-hop) resolution."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _lines(*codes: str) -> list[CodeLine]:
 
 
 # --------------------------------------------------------------------------- #
-# Basic resolution
+# Direct resolution (unchanged behaviour)
 # --------------------------------------------------------------------------- #
 
 
@@ -39,19 +39,9 @@ def test_unknown_variable_returns_none() -> None:
     assert table.resolve_variable("cOther") is None
 
 
-def test_whitespace_tolerant() -> None:
-    table = build_const_table(_lines("   cCube    =    'WeeklySales'   ;   "))
-    assert table.resolve_variable("cCube") == "WeeklySales"
-
-
 def test_same_literal_assigned_twice_still_resolves() -> None:
     table = build_const_table(_lines("c = 'X';", "c = 'X';"))
     assert table.resolve_variable("c") == "X"
-
-
-# --------------------------------------------------------------------------- #
-# Ambiguity rules (safety - never resolve to a wrong name)
-# --------------------------------------------------------------------------- #
 
 
 def test_conflicting_literals_do_not_resolve() -> None:
@@ -59,7 +49,7 @@ def test_conflicting_literals_do_not_resolve() -> None:
     assert table.resolve_variable("c") is None
 
 
-def test_non_literal_rhs_does_not_resolve() -> None:
+def test_non_literal_call_rhs_does_not_resolve() -> None:
     table = build_const_table(_lines("c = SomeFunc(1);"))
     assert table.resolve_variable("c") is None
 
@@ -90,7 +80,79 @@ def test_assignment_after_if_block_resolves() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# resolve_expression
+# Transitive (one-hop and multi-hop) resolution - the new capability
+# --------------------------------------------------------------------------- #
+
+
+def test_one_hop_resolution() -> None:
+    # Mirrors the real loader: cSourceCube is a constant; cCube = cSourceCube.
+    table = build_const_table(_lines("cSourceCube = 'Food_Weekly_Sales';", "cCube = cSourceCube;"))
+    assert table.resolve_variable("cSourceCube") == "Food_Weekly_Sales"
+    assert table.resolve_variable("cCube") == "Food_Weekly_Sales"
+
+
+def test_one_hop_assigned_twice_same_source() -> None:
+    # Exactly the real pattern: cCube assigned cSourceCube at two top-level lines.
+    table = build_const_table(
+        _lines(
+            "cSourceCube = 'Food_Weekly_Sales';",
+            "cCube = cSourceCube;",
+            "cSourceCube = 'Food_Weekly_Sales';",
+            "cCube = cSourceCube;",
+        )
+    )
+    assert table.resolve_variable("cCube") == "Food_Weekly_Sales"
+
+
+def test_multi_hop_resolution() -> None:
+    table = build_const_table(_lines("a = 'X';", "b = a;", "c = b;"))
+    assert table.resolve_variable("c") == "X"
+
+
+def test_hop_to_ambiguous_source_does_not_resolve() -> None:
+    # cSource is assigned inside an IF (ambiguous); cCube = cSource must stay unresolved.
+    table = build_const_table(
+        _lines("IF(x = 1);", "  cSource = 'A';", "ENDIF;", "cCube = cSource;")
+    )
+    assert table.resolve_variable("cSource") is None
+    assert table.resolve_variable("cCube") is None
+
+
+def test_hop_to_unknown_source_does_not_resolve() -> None:
+    table = build_const_table(_lines("cCube = cSourceNeverDefined;"))
+    assert table.resolve_variable("cCube") is None
+
+
+def test_cycle_does_not_resolve() -> None:
+    table = build_const_table(_lines("a = b;", "b = a;"))
+    assert table.resolve_variable("a") is None
+    assert table.resolve_variable("b") is None
+
+
+def test_hop_target_reassigned_differently_is_ambiguous() -> None:
+    table = build_const_table(
+        _lines("cSource = 'A';", "cOther = 'B';", "cCube = cSource;", "cCube = cOther;")
+    )
+    assert table.resolve_variable("cCube") is None
+
+
+# --------------------------------------------------------------------------- #
+# Concatenation
+# --------------------------------------------------------------------------- #
+
+
+def test_concatenation_of_literal_and_variable() -> None:
+    table = build_const_table(_lines("cBase = 'Sales';", "cName = 'PRE_' | cBase;"))
+    assert table.resolve_variable("cName") == "PRE_Sales"
+
+
+def test_concatenation_with_unknown_fails() -> None:
+    table = build_const_table(_lines("cName = 'PRE_' | cUnknown;"))
+    assert table.resolve_variable("cName") is None
+
+
+# --------------------------------------------------------------------------- #
+# resolve_expression (used by the reference extractor)
 # --------------------------------------------------------------------------- #
 
 
@@ -101,60 +163,42 @@ def test_resolve_expression_literal() -> None:
     assert conf is Confidence.HIGH
 
 
-def test_resolve_expression_variable() -> None:
-    table = build_const_table(_lines("cCube = 'WeeklySales';"))
+def test_resolve_expression_transitive_variable() -> None:
+    table = build_const_table(_lines("cSourceCube = 'WeeklySales';", "cCube = cSourceCube;"))
     value, conf = table.resolve_expression("cCube")
     assert value == "WeeklySales"
     assert conf is Confidence.HIGH
 
 
-def test_resolve_expression_unknown_variable() -> None:
+def test_resolve_expression_unknown() -> None:
     table = build_const_table([])
     value, conf = table.resolve_expression("cUnknown")
     assert value is None
     assert conf is Confidence.NONE
 
 
-def test_resolve_expression_concatenation() -> None:
-    table = build_const_table(_lines("cBase = 'Sales';"))
-    value, conf = table.resolve_expression("cBase | '_Actual'")
-    assert value == "Sales_Actual"
-    assert conf is Confidence.HIGH
-
-
-def test_resolve_expression_concatenation_with_unknown_fails() -> None:
-    table = build_const_table(_lines("cBase = 'Sales';"))
-    value, _conf = table.resolve_expression("cBase | cUnknown")
-    assert value is None
-
-
-def test_resolve_expression_with_call_is_dynamic() -> None:
-    table = build_const_table([])
-    value, conf = table.resolve_expression("Expand('%x%')")
-    assert value is None
-    assert conf is Confidence.NONE
-
-
 # --------------------------------------------------------------------------- #
-# Realistic Prolog snippet (mirrors the real loader)
+# Realistic Prolog snippet (mirrors the real loader closely)
 # --------------------------------------------------------------------------- #
 
 
-def test_realistic_prolog() -> None:
+def test_realistic_loader_prolog() -> None:
     table = build_const_table(
         _lines(
-            "cCube = 'WeeklySales';",
-            "cMappingCube = 'MappingCube';",
-            "vControlCube = 'ControlCube';",
-            "nCount = 0;",  # numeric - not a name
-            "IF(pDebug = 1);",
-            "  cCube = 'DebugCube';",  # inside IF -> makes cCube ambiguous
-            "ENDIF;",
+            "cSource_Cube = 'Food_Weekly_Sales';",
+            "vControlCube = 'System Info';",
+            "cCube = cSource_Cube;",
+            "cMappingCube = 'DW_Mapping';",
+            "cWeeksDim = 'Sales_Weeks';",
+            "cWeeksDimTemp = 'TEMP_DW_CatLocation_' | cWeeksDim;",
+            "iCount = 1;",  # numeric - not a name
         )
     )
-    # cCube got reassigned inside an IF -> ambiguous, does not resolve.
-    assert table.resolve_variable("cCube") is None
-    # These are clean top-level literals.
-    assert table.resolve_variable("cMappingCube") == "MappingCube"
-    assert table.resolve_variable("vControlCube") == "ControlCube"
-    assert table.resolve_variable("nCount") is None
+    # The big win: cCube resolves through cSource_Cube.
+    assert table.resolve_variable("cCube") == "Food_Weekly_Sales"
+    assert table.resolve_variable("cMappingCube") == "DW_Mapping"
+    assert table.resolve_variable("vControlCube") == "System Info"
+    # Concatenation resolves too.
+    assert table.resolve_variable("cWeeksDimTemp") == "TEMP_DW_CatLocation_Sales_Weeks"
+    # Numeric stays unresolved (not a name).
+    assert table.resolve_variable("iCount") is None

@@ -9,18 +9,20 @@ This pass scans a process's code lines and builds a :class:`ConstTable` mapping 
 variable to a resolved literal value, **where that resolution is safe**. Safety rules
 (mirroring spec 6.7's Static definition):
 
-- A variable assigned exactly one literal value (a single-quoted string or a plain
-  number) at the top level resolves to that value with **High** confidence.
-- A variable assigned the *same* literal more than once still resolves (High).
-- A variable assigned *different* literals, or assigned a non-literal expression, or
-  assigned anywhere inside a conditional/loop, becomes **ambiguous** and does not resolve
-  (so we never report a wrong cube name).
+- A variable resolves only if *every* top-level assignment to it (never inside an
+  IF/WHILE) assigns the **same** right-hand side.
+- That right-hand side resolves to a literal if it is a single-quoted string literal, or
+  a single variable that itself resolves (a **transitive / one-hop** resolution, so
+  ``cCube = cSourceCube`` where ``cSourceCube = 'WeeklySales'`` resolves ``cCube`` too).
+- Anything else (a numeric value, a function call, an arithmetic expression, or an
+  assignment inside a conditional/loop) leaves the variable **unresolved** - so we never
+  report a wrong cube name.
 
-The table can also resolve a simple ``a | b`` concatenation only when every part is itself
-resolvable; anything more complex is left unresolved (dynamic).
+Transitive resolution follows the chain to a fixed point, with a cycle guard, so
+``a = 'X'; b = a; c = b`` resolves ``c`` to ``X``, while ``a = b; b = a`` (no literal
+anchor) resolves neither.
 
-This module is pure text analysis - no TM1, no I/O. It consumes
-:class:`~tm1_data_dictionary.parser.blocks.CodeLine`s and is fully unit-tested.
+This module is pure text analysis - no TM1, no I/O. It is fully unit-tested.
 """
 
 from __future__ import annotations
@@ -49,15 +51,6 @@ class Confidence(str, Enum):
     NONE = "None"  # unresolved / ambiguous
 
 
-@dataclass
-class _VarState:
-    """Internal tracking of a variable while scanning."""
-
-    value: str | None = None
-    assign_count: int = 0
-    ambiguous: bool = False
-
-
 @dataclass(frozen=True)
 class ConstTable:
     """A resolved variable -> literal map for one process."""
@@ -71,16 +64,19 @@ class ConstTable:
     def resolve_expression(self, expr: str) -> tuple[str | None, Confidence]:
         """Resolve an argument expression to a literal, where safely possible.
 
-        Handles three cases:
-        - a single-quoted string literal -> its unquoted value (High),
-        - a bare variable present in the table -> its value (High),
-        - a simple ``a | b | ...`` concatenation where every part resolves (High).
-        Anything else returns ``(None, NONE)``.
+        Handles a string literal, a bare (possibly transitively-resolved) variable, and a
+        simple ``a | b | ...`` concatenation where every part resolves. Anything else
+        returns ``(None, NONE)``.
         """
         value = _resolve_expr(expr.strip(), self.values)
         if value is None:
             return None, Confidence.NONE
         return value, Confidence.HIGH
+
+
+# --------------------------------------------------------------------------- #
+# Expression helpers (used for both building the table and resolving targets)
+# --------------------------------------------------------------------------- #
 
 
 def _unquote_literal(token: str) -> str | None:
@@ -91,14 +87,21 @@ def _unquote_literal(token: str) -> str | None:
     return None
 
 
+def _is_identifier(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token.strip()))
+
+
+def _has_call(expr: str) -> bool:
+    """True if the expression contains a function call like NAME(...)."""
+    return bool(re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\(", expr))
+
+
 def _resolve_expr(expr: str, values: dict[str, str]) -> str | None:
     """Resolve a literal / variable / simple concatenation expression, or None."""
     expr = expr.strip()
     if not expr:
         return None
 
-    # Simple pipe concatenation: split at top level on '|'. If any part fails to resolve,
-    # the whole thing is dynamic.
     if "|" in expr and not _has_call(expr):
         parts = _split_top_level_pipe(expr)
         resolved_parts: list[str] = []
@@ -113,22 +116,13 @@ def _resolve_expr(expr: str, values: dict[str, str]) -> str | None:
 
 
 def _resolve_atom(atom: str, values: dict[str, str]) -> str | None:
-    """Resolve a single atom: a string literal or a known variable."""
+    """Resolve a single atom: a string literal or a known (resolved) variable."""
     lit = _unquote_literal(atom)
     if lit is not None:
         return lit
     if _is_identifier(atom):
         return values.get(atom)
     return None
-
-
-def _is_identifier(token: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token))
-
-
-def _has_call(expr: str) -> bool:
-    """True if the expression contains a function call like NAME(...)."""
-    return bool(re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\(", expr))
 
 
 def _split_top_level_pipe(expr: str) -> list[str]:
@@ -162,14 +156,20 @@ def _split_top_level_pipe(expr: str) -> list[str]:
     return parts
 
 
-def build_const_table(lines: list[CodeLine]) -> ConstTable:
-    """Scan code lines and build a :class:`ConstTable` of safe variable resolutions.
+# --------------------------------------------------------------------------- #
+# Building the table (two phases: collect, then resolve transitively)
+# --------------------------------------------------------------------------- #
 
-    A variable resolves only if *every* assignment to it, at the *top level* (never inside
-    an IF/WHILE), assigns the *same* literal value. Any violation marks it ambiguous.
+
+def _collect_candidate_rhs(lines: list[CodeLine]) -> dict[str, str]:
+    """Return ``{var: rhs}`` for variables safe to *attempt* to resolve.
+
+    A variable is a candidate only if every top-level assignment to it uses the *same*
+    right-hand side, and it is never assigned inside a conditional/loop.
     """
-    states: dict[str, _VarState] = {}
-    depth = 0  # control-flow nesting depth
+    raw: dict[str, list[str]] = {}
+    ambiguous: set[str] = set()
+    depth = 0
 
     for line in lines:
         code = line.code
@@ -177,10 +177,9 @@ def build_const_table(lines: list[CodeLine]) -> ConstTable:
             continue
 
         upper = code.upper()
-        first_word = re.match(r"\s*([A-Za-z]+)", upper)
-        word = first_word.group(1) if first_word else ""
+        word_match = re.match(r"\s*([A-Za-z]+)", upper)
+        word = word_match.group(1) if word_match else ""
 
-        # Track control-flow nesting so we can tell "top level" from "inside a branch".
         if word in _OPENERS or upper.startswith("IF(") or upper.startswith("WHILE("):
             depth += 1
             continue
@@ -193,29 +192,85 @@ def build_const_table(lines: list[CodeLine]) -> ConstTable:
         match = _ASSIGN.match(code)
         if not match:
             continue
-        name, rhs = match.group(1), match.group(2)
-
-        # Only resolve a *string literal* RHS (that is what cube/dim names are). A numeric
-        # or expression RHS does not give us a name to resolve to.
-        literal = _unquote_literal(rhs)
-
-        state = states.setdefault(name, _VarState())
-        state.assign_count += 1
+        name, rhs = match.group(1), match.group(2).strip()
 
         if depth > 0:
-            # Assigned inside a branch/loop -> not safely static.
-            state.ambiguous = True
+            ambiguous.add(name)
             continue
-        if literal is None:
-            # Top-level but non-literal RHS -> cannot resolve to a name.
-            state.ambiguous = True
-            continue
-        if state.value is None:
-            state.value = literal
-        elif state.value != literal:
-            state.ambiguous = True
+        raw.setdefault(name, []).append(rhs)
 
-    resolved = {
-        name: st.value for name, st in states.items() if st.value is not None and not st.ambiguous
-    }
+    candidates: dict[str, str] = {}
+    for name, rhs_list in raw.items():
+        if name in ambiguous:
+            continue
+        distinct = set(rhs_list)
+        if len(distinct) != 1:
+            ambiguous.add(name)  # assigned different things -> not safe
+            continue
+        candidates[name] = rhs_list[0]
+
+    # Remove any candidate that was later found ambiguous via a control-flow assignment.
+    return {name: rhs for name, rhs in candidates.items() if name not in ambiguous}
+
+
+def build_const_table(lines: list[CodeLine]) -> ConstTable:
+    """Scan code lines and build a :class:`ConstTable` of safe variable resolutions.
+
+    Resolves literals directly and follows single-variable chains transitively (one hop or
+    more) to a fixed point, with a cycle guard.
+    """
+    candidates = _collect_candidate_rhs(lines)
+    resolved: dict[str, str] = {}
+
+    def resolve(name: str, seen: frozenset[str]) -> str | None:
+        if name in resolved:
+            return resolved[name]
+        if name in seen:  # cycle -> no literal anchor
+            return None
+        rhs = candidates.get(name)
+        if rhs is None:
+            return None
+
+        # Direct string literal.
+        lit = _unquote_literal(rhs)
+        if lit is not None:
+            resolved[name] = lit
+            return lit
+
+        # Single-variable RHS -> follow the chain transitively.
+        if _is_identifier(rhs):
+            value = resolve(rhs, seen | {name})
+            if value is not None:
+                resolved[name] = value
+                return value
+
+        # Simple concatenation of resolvable parts (e.g. 'PRE_' | cSuffix).
+        if "|" in rhs and not _has_call(rhs):
+            parts = _split_top_level_pipe(rhs)
+            pieces: list[str] = []
+            ok = True
+            for part in parts:
+                part = part.strip()
+                lit_part = _unquote_literal(part)
+                if lit_part is not None:
+                    pieces.append(lit_part)
+                elif _is_identifier(part):
+                    v = resolve(part, seen | {name})
+                    if v is None:
+                        ok = False
+                        break
+                    pieces.append(v)
+                else:
+                    ok = False
+                    break
+            if ok:
+                value = "".join(pieces)
+                resolved[name] = value
+                return value
+
+        return None
+
+    for name in candidates:
+        resolve(name, frozenset())
+
     return ConstTable(values=resolved)
