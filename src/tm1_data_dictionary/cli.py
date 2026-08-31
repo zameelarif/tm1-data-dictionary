@@ -16,6 +16,7 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.extract import extract_all
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.const_prop import build_const_table
@@ -418,6 +419,50 @@ def extract_cube(name: str, config_path: str) -> None:
             click.echo(f"Wrote {written} rows into }}Meta_Process_Cube.")
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command(name="extract")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-process progress lines (show only the summary).",
+)
+def extract(config_path: str, quiet: bool) -> None:
+    """Extract cube lineage for EVERY process in the instance into }Meta_Process_Cube.
+
+    Applies exclusion rules (Bedrock/utility, test/temp). One malformed process does
+    not abort the run. Honours dry-run mode in config (parses and reports, writes nothing).
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    def _progress(i: int, total: int, name: str, status: str) -> None:
+        if not quiet:
+            click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
+
+    try:
+        with TM1Client(cfg) as client:
+            if client.dry_run:
+                click.echo("Dry-run: parsing all processes, nothing will be written.")
+            click.echo("Extracting cube lineage for all processes...")
+            summary = extract_all(client, progress=_progress)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("")
+    click.echo("Extraction complete.")
+    for line in summary.as_lines():
+        click.echo(f"  {line}")
 
 
 if __name__ == "__main__":

@@ -90,3 +90,13 @@ def write_cube_lineage(client: TM1Client, rows: list[CubeLineageRow]) -> int:
 
     service.cells.write(cube_name=CUBE_PROCESS_CUBE, cellset_as_dict=cellset)
     return len(rows)
+
+
+def clear_process_cube(client) -> None:  # noqa: ANN001
+    """Clear all data from }Meta_Process_Cube (full clear-and-reload strategy).
+
+    Uses TM1py's ``cells.clear(cube=...)`` which clears all leaves of every
+    dimension not referenced - i.e. the whole cube. Guarded by dry-run.
+    """
+    client.ensure_writable("clear }Meta_Process_Cube")
+    client.service.cells.clear(cube=CUBE_PROCESS_CUBE)
