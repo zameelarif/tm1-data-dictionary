@@ -1,21 +1,24 @@
 """Decide which processes to include in extraction, and record why others are excluded.
 
-The dictionary should not be cluttered with framework/utility processes (Bedrock, Arc,
-Pulse, Cubewise helpers) or in-flight developer work (``test``/``temp``/``scratch``
-processes). This module applies two configurable rule categories to a process name:
+The dictionary should catalogue *business* processes, not the framework/system machinery
+that clutters a real instance. Two observations drive the default rules:
 
-- **name-prefix / glob patterns** (e.g. ``bedrock.*``, ``}bedrock.*``, ``cubewise.*``) -
-  matched as case-insensitive shell-style globs against the whole name;
-- **substrings** (e.g. ``test``, ``temp``, ``tmp``, ``scratch``) - matched
-  case-insensitively anywhere in the name.
+1. **Control/system/framework processes start with ``}``.** In TM1, a leading ``}`` marks
+   a control object. Every framework family we see in practice - Pulse (``}APQ.*``,
+   ``}pulse_*``), the planning sample (``}tp_*``), Bedrock (``}bedrock.*``), drill
+   definitions (``}Drill_*``), export utilities (``}src_*``) - is ``}``-prefixed. Business
+   processes essentially never are. So a single ``}*`` pattern removes the bulk of the noise.
 
-An **explicit include list** always wins (so a genuine business process called
-``Test.Coverage.RealThing`` can be forced in), and an **explicit exclude list** names exact
-processes to always skip.
+2. **Some framework tools use non-brace names** (``bedrock.*``, ``cubewise.*``, ``arc.*``,
+   ``pulse.*``, ``pa.tools.*``), and in-flight developer work uses ``test``/``temp``/etc.
 
-The decision is returned as an :class:`ExclusionDecision` carrying the reason, so excluded
-processes can be *recorded* (never silently dropped). Rules are supplied as plain data
-(:class:`ExclusionRules`), so this module needs no config plumbing and is trivially tested.
+Rules are applied with an explicit precedence (see :func:`decide`). An **explicit include**
+list always wins, so a genuine business process that happens to match a rule (or is
+``}``-prefixed) can be forced in. Every exclusion is *recorded* with its reason - never
+silently dropped.
+
+Rules are plain data (:class:`ExclusionRules`), so this module needs no config plumbing and
+is trivially tested.
 """
 
 from __future__ import annotations
@@ -35,11 +38,17 @@ class ExclusionRules:
 
     @classmethod
     def default(cls) -> ExclusionRules:
-        """Sensible Phase-1 defaults (Bedrock/utility + test/temp)."""
+        """Sensible Phase-1 defaults.
+
+        ``}*`` excludes all control/system/framework processes (Pulse, planning sample,
+        Bedrock, drill definitions, export utilities - all ``}``-prefixed). The remaining
+        patterns catch non-brace framework tools, and the substrings catch test/temp work.
+        Any of these can be overridden per-client via ``explicit_include``.
+        """
         return cls(
             name_patterns=(
-                "bedrock.*",
-                "}bedrock.*",
+                "}*",  # all }-prefixed control/system/framework processes
+                "bedrock.*",  # non-brace Bedrock installs
                 "cubewise.*",
                 "arc.*",
                 "pulse.*",
@@ -55,7 +64,7 @@ class ExclusionDecision:
 
     name: str
     included: bool
-    matched_rule: str = ""  # e.g. "pattern:bedrock.*", "substring:test", "explicit_exclude"
+    matched_rule: str = ""  # e.g. "pattern:}*", "substring:test", "explicit_exclude"
 
     @property
     def excluded(self) -> bool:
@@ -126,6 +135,13 @@ class PartitionResult:
     @property
     def excluded_count(self) -> int:
         return len(self.excluded)
+
+    def excluded_by_rule(self) -> dict[str, int]:
+        """Count of exclusions grouped by the rule that caused them (for reporting)."""
+        counts: dict[str, int] = {}
+        for d in self.excluded:
+            counts[d.matched_rule] = counts.get(d.matched_rule, 0) + 1
+        return counts
 
 
 def partition(names: list[str], rules: ExclusionRules) -> PartitionResult:
