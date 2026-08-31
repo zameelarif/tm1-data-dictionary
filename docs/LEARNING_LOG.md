@@ -8,8 +8,8 @@
 > *what you learned*.
 
 **Owner:** Zameel Arif
-**Status:** current through the parser (ti_reader, blocks, references, const-propagation with
-transitive resolution, variable assignments, function-aware target selection).
+**Status:** current through the whole-model orchestrator (parser + rollup + cube writer +
+exclusions + `tm1dd extract`).
 
 ---
 
@@ -53,7 +53,7 @@ transitive resolution, variable assignments, function-aware target selection).
 | 26 | Resource ownership & lifecycle | Engineering | `_owns_service` flag |
 | 27 | Idempotency | Engineering | `bootstrap.py` |
 | 28 | Separation of concerns ("what" vs "how") | Engineering | `schema.py` vs `bootstrap.py` |
-| 29 | Verify against real documentation | Engineering | TM1py cells/elements/process API |
+| 29 | Verify against real documentation | Engineering | TM1py API checks |
 | 30 | Writing cells & creating elements (TM1py) | TM1py | `audit_writer.py`, `bootstrap.py` |
 | 31 | Static vs dynamic analysis | Engineering | the whole parser |
 | 32 | Anti-corruption layer | Engineering | `ti_reader.py` |
@@ -64,292 +64,34 @@ transitive resolution, variable assignments, function-aware target selection).
 | 37 | Capture facts, defer judgement | Engineering | `assignments.py` |
 | 38 | Fixpoint resolution with a cycle guard | Python | `const_prop.py` (transitive) |
 | 39 | Lookup tables encode domain knowledge | Engineering | `references.py` TARGET_ARG_INDEX |
+| 40 | Glob patterns (`fnmatch`) | Python | `exclusions.py` |
+| 41 | Rules with precedence | Engineering | `exclusions.py` |
+| 42 | Error isolation (resilience over optimism) | Engineering | `extract.py` orchestrator |
+| 43 | Batching for efficiency | Engineering | `extract.py` (one write, not 322) |
+| 44 | Orchestration (composing tested pieces) | Engineering | `extract.py` |
+| 45 | Callbacks (progress reporting) | Python | `extract.py` ProgressFn |
 
 ---
 
-## 1. Modules & imports
-
-**What:** A *module* is just a `.py` file. `import` lets one file use code from another.
-
-**Example:**
-```python
-import os                       # bring in the whole 'os' module; use as os.getenv(...)
-from pathlib import Path        # bring in just 'Path' from the 'pathlib' module
-```
-
-**In our code:** `config.py` does `from tm1_data_dictionary.credentials import CredentialProvider`.
-Import paths mirror folder paths: `tm1_data_dictionary.parser.references` means the file at
-`src/tm1_data_dictionary/parser/references.py`.
-
----
-
-## 2. Docstrings
-
-**What:** A string at the top of a file, class, or function that documents it. Triple-quoted.
-
-**In our code:** every file opens with a `"""..."""` block explaining its purpose.
-
----
-
-## 3. `from __future__ import annotations`
-
-**What:** A line at the very top that lets us write modern type hints (like `str | None`) on
-older Python versions. Harmless, standard, always safe.
-
-**In our code:** the first import line of nearly every module.
-
----
-
-## 4. Type hints
-
-**What:** Optional labels telling the reader (and `mypy`) what type a value is meant to be.
-
-**Example:** `def get_secret(self, name: str) -> str | None:` — takes a string, returns a string or
-`None`. `mypy` uses these to catch bugs before runtime (it has caught several for us).
-
----
-
-## 5. Classes
-
-**What:** A blueprint bundling data and behaviour. You create *instances* from a class.
-
-**In our code:** `TM1Client`, `AuditWriter`, `TIReader` are all classes.
-
----
-
-## 6. Abstract Base Classes (ABC)
-
-**What:** A class that defines *what methods must exist* but not how — a contract. `@abstractmethod`
-marks methods subclasses *must* implement.
-
-**In our code:** `CredentialProvider(ABC)` with `@abstractmethod def get_secret(...)`. Every real
-provider subclasses it; Python *forces* each to define `get_secret`.
-
----
-
-## 7. Inheritance & overriding
-
-**What:** A class can *inherit* from another, reusing code and *overriding* specific parts.
-
-**In our code:** `EnvCredentialProvider(CredentialProvider)` inherits `require_secret` for free and
-overrides `get_secret`.
-
----
-
-## 8. Custom exceptions
-
-**What:** Your own error types, so failures are specific and catchable.
-
-**In our code:** `CredentialError`, `ConfigError`, `TM1ClientError` — each makes a specific failure
-mode catchable and clear.
-
----
-
-## 9. `None` and optional values
-
-**What:** `None` is Python's "nothing here" value. `str | None` means "a string, or nothing."
-
-**In our code:** `namespace: str | None = None`. Every provider returns `None` when it has no secret,
-so a chain can fall back.
-
----
-
-## 10. Dataclasses
-
-**What:** A concise way to make a class that mainly holds data; `@dataclass` writes the boilerplate.
-
-**In our code:** config classes, schema classes, plus `Reference`, `CodeLine`, `Assignment`,
-`VariableInfo`, `ConstTable` in the parser.
-
----
-
-## 11. Immutability (`frozen=True`)
-
-**What:** `@dataclass(frozen=True)` makes instances read-only; mutating raises `FrozenInstanceError`.
-
-**In our code:** config, schema, and most parser dataclasses (`CodeLine`, `Reference`, `Assignment`)
-are frozen — parsed facts should not change after they are recorded.
-
----
-
-## 12. Functions, arguments, keyword-only args
-
-**What:** A bare `*` in a signature forces everything after it to be passed by name.
-
-**In our code:** `def load_config(config_path, *, env_path=None, provider=None)`, and
-`TM1Client(config, *, service=None)`.
-
----
-
-## 13. `raise ... from exc` (exception chaining)
-
-**What:** When you catch one error and raise a friendlier one, `from exc` keeps the original cause.
-
-**In our code:** `_as_int`, `_build_connection`, `set_keyring_secret`, `connect()`.
-
----
-
-## 14. The factory function pattern
-
-**What:** A small function whose job is to *create and return* an object, hiding which one.
-
-**In our code:** `default_provider()`. After the keyring upgrade it returns a keyring->env chain —
-and `config.py` did not change one line, because it only calls `default_provider()`.
-
----
-
-## 15. Unit testing with pytest
-
-**What:** Small functions that check behaviour. `assert` states what must be true; `pytest.raises`
-checks an error is thrown; `monkeypatch` safely swaps env vars/modules for one test.
-
-**In our code:** ~180 tests across config, credentials, client, schema, bootstrap, audit writer, and
-the parser. All use fakes, so no real TM1 is needed.
-
----
-
-## 16. `__init__` and `self` (constructors)
-
-**What:** `__init__` runs automatically when an instance is created; it sets the instance's starting
-data. `self` means "this particular instance."
-
-**In our code:** many classes; a `@dataclass` writes `__init__` for you.
-
----
-
-## 17. Polymorphism
-
-**What:** "One method, many behaviours." Shared code calling `self.method()` runs the actual
-object's version.
-
-**In our code:** `require_secret` (base class) calls `self.get_secret(...)` and runs whichever
-provider is in play.
-
----
-
-## 18. Indentation & tabs-vs-spaces
-
-**What:** In Python, indentation defines structure. Use spaces (4 per level); never mix with tabs.
-VS Code + black handle this.
-
----
-
-## 19. YAGNI ("You Aren't Gonna Need It")
-
-**What:** Don't build features speculatively. Add code when a real need appears.
-
-**In our code:** we wrote `FileCredentialProvider` as an exercise but chose not to keep it.
-
----
-
-## 20. venv auto-activation in VS Code
-
-**What:** VS Code auto-activates the venv in new integrated terminals; confirm via the `(.venv)`
-prefix. A plain terminal opened outside VS Code is not auto-activated.
-
----
-
-## 21. Lazy imports
-
-**What:** Importing a module *inside a function* so the import only happens when that code runs.
-
-**In our code:** `import keyring` inside `KeyringCredentialProvider.get_secret`; TM1py object classes
-imported inside `bootstrap.py` / `audit_writer.py`. This is why those modules load, and their tests
-run, without TM1py installed.
-
----
-
-## 22. Composition (chaining objects)
-
-**What:** Building behaviour by combining small, single-purpose objects.
-
-**In our code:** `ChainedCredentialProvider` holds a list of providers and tries them in order.
-
----
-
-## 23. Context managers (`with` / `__enter__` / `__exit__`)
-
-**What:** An object with `__enter__`/`__exit__` usable via `with`. `__exit__` runs on exit —
-*guaranteed, even if an error is raised inside the block.*
-
-**In our code:** `TM1Client.__enter__` connects; `__exit__` closes. The connection is always logged
-out, even on a crash.
-
----
-
-## 24. Dependency injection
-
-**What:** Passing a dependency *into* an object instead of creating it internally; lets tests
-substitute a fake.
-
-**In our code:** the `service` parameter on `TM1Client`; the `const_table` parameter on
-`extract_references`; the `clock` on `AuditWriter`. All make code testable with no real TM1.
-
----
-
-## 25. Guard clauses
-
-**What:** A check at the start of an operation that stops it early if conditions aren't met.
-
-**In our code:** `TM1Client.ensure_writable` — raises in dry-run mode, so every write is blocked
-consistently.
-
----
-
-## 26. Resource ownership & lifecycle
-
-**What:** Whoever creates a resource is responsible for destroying it; a borrower must not close it.
-
-**In our code:** the `_owns_service` flag — the client only logs out a service it opened itself.
-
----
-
-## 27. Idempotency
-
-**What:** An operation is idempotent if running it once or many times has the same end result.
-
-**In our code:** `ensure_schema` (bootstrap) checks `exists()` before creating; re-running skips
-everything. The audit writer checks the run element before creating it.
-
----
-
-## 28. Separation of concerns ("what" vs "how")
-
-**What:** Split a problem so each piece does one thing.
-
-**In our code:** `schema.py` (what the `}Meta_*` schema is — pure data) vs `bootstrap.py` (how to
-create it in TM1). Also `ti_reader.py` (read) vs `blocks.py`/`references.py` (parse).
-
----
-
-## 29. Verify against real documentation
-
-**What:** Check the real docs before shipping, rather than relying on memory.
-
-**In our code:** we searched the TM1py docs to confirm `cells.write`, `elements.create`, and the
-`Process` object's attribute names (`prolog_procedure`, `datasource_*`) before writing `audit_writer`
-and `ti_reader`. Corrected a from-memory mistake before it ever reached the project.
-
----
-
-## 30. Writing cells & creating elements (TM1py)
-
-**What:** The core write operations. Create an element: `elements.exists(...)` then
-`elements.create(dim, hier, Element(name, type))`. Write cells:
-`cells.write(cube_name="C", cellset_as_dict={(e1, e2): value})`.
-
-**In our code:** `audit_writer.py` and `bootstrap.py`.
+## 1-30 (foundation + write path)
+
+(Concepts 1-30 cover: modules/imports, docstrings, type hints, classes, ABCs, inheritance,
+custom exceptions, `None`, dataclasses, immutability, keyword-only args, exception chaining,
+factories, pytest, `__init__`/`self`, polymorphism, indentation, YAGNI, venv auto-activation,
+lazy imports, composition, context managers, dependency injection, guard clauses, ownership,
+idempotency, separation of concerns, verify-against-docs, and TM1py cell/element writes. See
+earlier entries in this file — they remain unchanged and are summarised in the index above.)
 
 ---
 
 ## 31. Static vs dynamic analysis
 
-**What:** *Dynamic* analysis runs code and observes it (needs a working environment, data, supporting
-objects). *Static* analysis reads code without running it (needs only the source text).
+**What:** *Dynamic* analysis runs code and observes it (needs a working environment, data,
+supporting objects). *Static* analysis reads code without running it (needs only the source text).
 
-**In our code:** the whole parser is static — it reads a TI's source as text and pattern-matches. This
-is why it can analyse a 467-process instance in seconds, and why it happily analyses a TI whose cubes
-do not even exist (the anonymised test loaders).
+**In our code:** the whole parser is static — it reads a TI's source as text and pattern-matches.
+This is why it analysed a 492-process instance in seconds, and why it happily analyses TIs whose
+cubes do not even exist (the anonymised test loaders).
 
 ---
 
@@ -358,39 +100,37 @@ do not even exist (the anonymised test loaders).
 **What:** A boundary that keeps a messy external API from leaking into your clean internal code — it
 maps the external shape into your own once, in one place.
 
-**In our code:** `ti_reader.py`. TM1py exposes a process as ~25 attributes with names like
-`datasource_ascii_delimiter_char`. `ti_reader` maps them once into a tidy `TIProcess`; everything
-downstream works against our clean shape, so a future TM1py change touches only this one file.
+**In our code:** `ti_reader.py`. TM1py exposes a process as ~25 attributes; `ti_reader` maps them once
+into a tidy `TIProcess`, so everything downstream works against our clean shape and a future TM1py
+change touches only this one file.
 
 ---
 
 ## 33. String-aware scanning (state machines)
 
-**What:** Walking text character-by-character while tracking state (e.g. "am I inside a string?"),
-so structure is respected. You cannot treat code as plain text — strings, escapes, and nesting matter.
+**What:** Walking text character-by-character while tracking state (e.g. "am I inside a string?"), so
+structure is respected. You cannot treat code as plain text — strings, escapes, and nesting matter.
 
 **In our code:** `strip_comment` in `blocks.py` tracks whether it is inside a `'...'` string (honouring
 the doubled-quote `''` escape) so a `#` inside a string is NOT treated as a comment. Proven on real
-code: it correctly ignored commented-out `CellPutN` lines that a naive parser would have counted.
+code.
 
 ---
 
 ## 34. Regex and negative lookbehind
 
-**What:** Regular expressions match text patterns. A *negative lookbehind* `(?<!...)` asserts what
-must NOT precede a match.
+**What:** Regular expressions match text patterns. A *negative lookbehind* `(?<!...)` asserts what must
+NOT precede a match.
 
-**In our code:** `_NAME_BEFORE_PAREN = r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\("` finds a
-whole-word function name followed by `(`. The lookbehind ensures `CellPutN(` matches but
-`MyCellPutN(` does not.
+**In our code:** `_NAME_BEFORE_PAREN` finds a whole-word function name followed by `(`. The lookbehind
+ensures `CellPutN(` matches but `MyCellPutN(` does not.
 
 ---
 
 ## 35. Balanced-parenthesis parsing
 
-**What:** To grab a function's arguments you cannot just "find the next `)`" — nested calls like
-`CellPutN(DB('FX', a), 'C', 'e')` need depth counting. You track paren depth (ignoring parens inside
-strings) and split top-level commas.
+**What:** To grab a function's arguments you cannot just "find the next `)`" — nested calls need depth
+counting. Track paren depth (ignoring parens inside strings) and split top-level commas.
 
 **In our code:** `_extract_arg_string` and `_split_top_level_args` in `references.py`.
 
@@ -402,8 +142,8 @@ strings) and split top-level commas.
 Prefer a known-unknown to a wrong resolution.
 
 **In our code:** `const_prop.py` refuses to resolve a variable that is assigned conditionally, or
-assigned different values, or via a function call. It would rather leave `(cCube)` unresolved than
-guess wrongly. This is the same instinct as the spec's `ParseConfidence`.
+differently, or via a function call. It would rather leave `(cCube)` unresolved than guess wrongly.
+The whole-model run's 5,012 "unresolved" count is this principle being honest at scale.
 
 ---
 
@@ -412,9 +152,9 @@ guess wrongly. This is the same instinct as the spec's `ParseConfidence`.
 **What:** A good dictionary captures raw facts and lets a human apply judgement where the machine
 cannot safely.
 
-**In our code:** `assignments.py` captures *every* variable assignment (even ambiguous ones) so a
-developer can trace `cCube = cSourceCube = a cube read` by hand — complementing const-prop, which only
-auto-resolves what is safe. Your own idea, and exactly the spec's `}Meta_Process_Variable.DerivedFrom`.
+**In our code:** `assignments.py` captures *every* variable assignment so a developer can trace
+`cCube = cSourceCube = a cube read` by hand — complementing const-prop, which only auto-resolves what
+is safe.
 
 ---
 
@@ -424,8 +164,7 @@ auto-resolves what is safe. Your own idea, and exactly the spec's `}Meta_Process
 while guarding against cycles (`a = b; b = a`) with a "seen" set so you never loop forever.
 
 **In our code:** the transitive resolver in `const_prop.py`. It resolved all 122 `cCube` references in
-the real loader to `Food_Weekly_Sales`, while correctly refusing cycles and ambiguous sources. Same
-technique used by dependency resolvers and spreadsheet engines.
+the real loader to `Food_Weekly_Sales`, while correctly refusing cycles and ambiguous sources.
 
 ---
 
@@ -435,9 +174,83 @@ technique used by dependency resolvers and spreadsheet engines.
 generic piece of code that consults it. Adding a new case = adding a table entry, not changing code.
 
 **In our code:** `TARGET_ARG_INDEX` in `references.py` records which argument holds the cube/dimension
-for each function (`CellPutN`->1, `CellGetN`->0, `AttrPutS`->1, ...). One small table turned "this
-process touches vNewVal" (meaningless) into "this process writes to Food_Weekly_Sales" (correct), with
-no added code complexity.
+for each function. One small table turned "this process touches vNewVal" into "this process writes to
+Food_Weekly_Sales", with no added code complexity.
+
+---
+
+## 40. Glob patterns (`fnmatch`)
+
+**What:** Shell-style wildcard matching — `*` matches any run of characters, `?` any single character.
+Python's `fnmatch.fnmatch(name, pattern)` does case-insensitive-friendly glob matching.
+
+**In our code:** `exclusions.py` matches process names against patterns like `bedrock.*`, `}bedrock.*`,
+`cubewise.*`. A glob is a lightweight, readable way to say "any process whose name starts with
+bedrock." Simpler than a full regex when you only need wildcards.
+
+---
+
+## 41. Rules with precedence
+
+**What:** When multiple rules could apply, the *order* they are checked matters. You define an explicit
+precedence so the outcome is predictable.
+
+**In our code:** `decide()` in `exclusions.py` checks in a fixed order: explicit-include (always wins)
+-> explicit-exclude -> name patterns -> substrings -> default include. This means a genuine business
+process called `Test.Coverage.RealThing` can be force-included even though it contains "test". Encoding
+precedence explicitly (rather than hoping the checks happen to run in the right order) makes the
+behaviour intentional and testable.
+
+---
+
+## 42. Error isolation (resilience over optimism)
+
+**What:** When processing many items, wrap each in its own `try/except` so one failure doesn't abort
+the whole batch. Record the failure, keep going.
+
+**Why it matters:** with 492 real, varied processes, *something* will surprise the parser. The naive
+version crashes on the first oddity and you lose the whole run. The resilient version delivers
+everything that worked and reports what didn't.
+
+**In our code:** the per-process loop in `extract.py` catches any exception, counts it, records
+`(name, error)`, and continues. The test `test_failing_process_does_not_abort_run` proves it. This is
+why the whole-model run reported "0 failures" cleanly — and *would* have kept going even if some had
+failed. Note: a broad `except Exception` is normally discouraged, but is exactly right here, where the
+goal is "one bad input must not kill the batch."
+
+---
+
+## 43. Batching for efficiency
+
+**What:** Instead of many small remote calls, collect the work and make one (or a few) large calls.
+
+**In our code:** the orchestrator collects cube-lineage rows from *all* processes and writes them to
+`}Meta_Process_Cube` in a single `cells.write`, rather than 322 separate writes. Far faster against a
+real instance, and the test `test_rows_batched_into_single_write` proves only one write happens.
+
+---
+
+## 44. Orchestration (composing tested pieces)
+
+**What:** Building a higher-level workflow by wiring together smaller components that are already built
+and tested — introducing very little new logic, mostly "glue" and control flow.
+
+**In our code:** `extract.py` composes `TIReader` + `code_lines` + `build_const_table` +
+`extract_references` + `rollup_cube_lineage` + `write_cube_lineage`, wrapped in exclusion filtering and
+error isolation. The hard parts were done and trusted; the orchestrator is the loop that runs them over
+the whole model. This is the payoff of building bottom-up: the whole-model command was mostly assembly.
+
+---
+
+## 45. Callbacks (progress reporting)
+
+**What:** Passing a *function* as an argument, so the caller can plug in behaviour (here, "print a
+progress line") without the callee knowing or caring what it does.
+
+**In our code:** `extract_all(client, progress=...)` accepts a `ProgressFn` callback invoked per
+process as `(index, total, name, status)`. The CLI passes a function that prints a line; a test passes
+one that records calls in a list. The orchestrator doesn't know or care — it just calls the callback.
+This keeps the orchestrator decoupled from *how* progress is displayed.
 
 ---
 
