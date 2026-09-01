@@ -16,10 +16,12 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.const_prop import build_const_table
+from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
@@ -463,6 +465,95 @@ def extract(config_path: str, quiet: bool) -> None:
     click.echo("Extraction complete.")
     for line in summary.as_lines():
         click.echo(f"  {line}")
+
+
+@main.command(name="diagnose-unresolved")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--top",
+    default=25,
+    show_default=True,
+    help="How many top offender expressions to show (0 = all).",
+)
+@click.option(
+    "--process",
+    "process_name",
+    default="",
+    help="Diagnose a single process in detail instead of the whole model.",
+)
+def diagnose_unresolved(config_path: str, top: int, process_name: str) -> None:
+    """Report which cube-target expressions stay unresolved (read-only, no writes).
+
+    Whole-model mode (default): groups unresolved cube targets by expression, sorted by
+    how often each occurs - the priorities for improving resolution. Single-process mode
+    (--process): lists that process's unresolved references with line numbers.
+    """
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    def _refs_for(reader: TIReader, name: str) -> list:
+        ti = reader.read(name)
+        lines = code_lines(ti)
+        const_table = build_const_table(lines)
+        return extract_references(lines, const_table=const_table)
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+
+            # ---- Single-process detail mode ----
+            if process_name:
+                if not reader.exists(process_name):
+                    raise click.ClickException(f"Process not found: {process_name}")
+                refs = _refs_for(reader, process_name)
+                occ = collect_unresolved(process_name, refs)
+                click.echo(f"Process: {process_name}")
+                click.echo(f"Unresolved cube references: {len(occ)}")
+                if occ:
+                    click.echo(f"  {'BLOCK':<9} {'LINE':>5}  {'ROLE':<10} EXPRESSION")
+                    click.echo(f"  {'-' * 9} {'-' * 5}  {'-' * 10} {'-' * 30}")
+                    for o in occ:
+                        click.echo(
+                            f"  {o.block:<9} {o.line_no:>5}  {o.role.value:<10} {o.expression}"
+                        )
+                return
+
+            # ---- Whole-model mode ----
+            all_names = reader.list_process_names()
+            part = partition(all_names, ExclusionRules.default())
+
+            process_refs: dict[str, list] = {}
+            for name in part.included:
+                try:
+                    process_refs[name] = _refs_for(reader, name)
+                except Exception as exc:  # noqa: BLE001 - isolate per-process failures
+                    click.echo(f"  (skip {name}: {type(exc).__name__})")
+
+            report = diagnose(process_refs)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("")
+    click.echo(f"Included processes analysed: {len(process_refs)}")
+    click.echo(f"Total unresolved cube references: {report.total}")
+    click.echo("")
+    limit = None if top == 0 else top
+    groups = report.top(limit=limit)
+    click.echo(f"Top {'all' if limit is None else limit} unresolved target expressions:")
+    click.echo(f"  {'COUNT':>6}  {'PROCS':>5}  EXPRESSION")
+    click.echo(f"  {'-' * 6}  {'-' * 5}  {'-' * 40}")
+    for g in groups:
+        click.echo(f"  {g.count:>6}  {g.process_count:>5}  {g.expression}")
+    if limit is not None and len(report.groups) > limit:
+        click.echo(f"  ... and {len(report.groups) - limit} more distinct expressions")
 
 
 if __name__ == "__main__":
