@@ -1,4 +1,4 @@
-"""Unit tests for the unresolved-reference diagnostics."""
+"""Unit tests for the unresolved-reference diagnostics (with per-occurrence locations)."""
 
 from __future__ import annotations
 
@@ -52,7 +52,6 @@ def test_resolved_variable_is_not_unresolved() -> None:
 
 
 def test_non_cube_role_is_not_unresolved() -> None:
-    # A chain with a dynamic target is not a *cube* unresolved ref.
     assert is_unresolved_cube_ref(_ref(role=Role.CHAIN, target="pProc", literal=False)) is False
     assert is_unresolved_cube_ref(_ref(role=Role.DIM_UPDATE, target="cDim", literal=False)) is False
 
@@ -84,7 +83,7 @@ def test_collect_records_location() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# diagnose (whole-model aggregation)
+# diagnose - grouping / counting
 # --------------------------------------------------------------------------- #
 
 
@@ -104,7 +103,7 @@ def test_diagnose_groups_and_counts() -> None:
 
     groups = {g.expression: g for g in report.top()}
     assert groups["vDestCube"].count == 3
-    assert groups["vDestCube"].process_count == 2  # P1 and P2
+    assert groups["vDestCube"].process_count == 2
     assert groups["cCube"].count == 1
     assert groups["pTarget"].count == 1
 
@@ -122,7 +121,7 @@ def test_top_sorted_by_frequency() -> None:
     }
     report = diagnose(process_refs)
     top = report.top()
-    assert [g.expression for g in top] == ["b", "c", "a"]  # 3, 2, 1
+    assert [g.expression for g in top] == ["b", "c", "a"]
     assert [g.count for g in top] == [3, 2, 1]
 
 
@@ -138,13 +137,13 @@ def test_group_example_is_first_occurrence() -> None:
     report = diagnose(process_refs)
     group = report.top()[0]
     assert group.example is not None
-    assert group.example.line_no == 5  # the first one seen
+    assert group.example.line_no == 5
 
 
 def test_ignores_resolved_and_literals_across_model() -> None:
     process_refs = {
         "P1": [_ref(target="GL", literal=True), _ref(target="cC", resolved="Sales")],
-        "P2": [_ref(target="vReal")],  # the only genuinely unresolved one
+        "P2": [_ref(target="vReal")],
     }
     report = diagnose(process_refs)
     assert report.total == 1
@@ -152,7 +151,6 @@ def test_ignores_resolved_and_literals_across_model() -> None:
 
 
 def test_realistic_shape() -> None:
-    """A realistic spread: one dominant expression, a couple of long-tail ones."""
     process_refs = {
         "Proc.A": [_ref(target="vDestCube") for _ in range(8)],
         "Proc.B": [_ref(target="vDestCube") for _ in range(5)]
@@ -165,3 +163,56 @@ def test_realistic_shape() -> None:
     assert top[0].count == 13
     assert top[0].process_count == 2
     assert report.total == 17
+
+
+# --------------------------------------------------------------------------- #
+# find - the new capability (locate occurrences of an exact expression)
+# --------------------------------------------------------------------------- #
+
+
+def test_find_returns_all_occurrences_with_location() -> None:
+    process_refs = {
+        "P1": [_ref(target="pCubeName", block="Data", line=20)],
+        "P2": [
+            _ref(target="pCubeName", block="Prolog", line=5),
+            _ref(target="pCubeName", block="Data", line=88),
+        ],
+        "P3": [_ref(target="other")],
+    }
+    report = diagnose(process_refs)
+    found = report.find("pCubeName")
+    assert len(found) == 3
+    # Processes and locations are preserved.
+    procs = {o.process for o in found}
+    assert procs == {"P1", "P2"}
+    lines = sorted(o.line_no for o in found)
+    assert lines == [5, 20, 88]
+
+
+def test_find_blank_expression() -> None:
+    # The empty-string target (a parse edge case) can be located.
+    process_refs = {
+        "P1": [_ref(target="", block="Data", line=12)],
+        "P2": [_ref(target="", block="Epilog", line=3), _ref(target="cC", resolved="X")],
+    }
+    report = diagnose(process_refs)
+    found = report.find("")
+    assert len(found) == 2
+    assert {o.process for o in found} == {"P1", "P2"}
+
+
+def test_find_unknown_expression_returns_empty() -> None:
+    report = diagnose({"P": [_ref(target="a")]})
+    assert report.find("does-not-exist") == []
+
+
+def test_find_matches_top_counts() -> None:
+    # find(expr) length must equal that group's count.
+    process_refs = {
+        "A": [_ref(target="pTargetCube") for _ in range(4)],
+        "B": [_ref(target="pTargetCube") for _ in range(2)],
+    }
+    report = diagnose(process_refs)
+    group = report.top()[0]
+    assert group.expression == "pTargetCube"
+    assert len(report.find("pTargetCube")) == group.count == 6

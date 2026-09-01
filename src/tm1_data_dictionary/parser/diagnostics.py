@@ -4,11 +4,11 @@ After the whole-model run, some cube reads/writes have a target that stayed *dyn
 const-propagation could not safely resolve the variable/expression to a concrete cube name.
 Those references are counted (the "unresolved" number) but not written to the dictionary.
 
-This module turns that opaque number into an actionable list: it collects the unresolved
+This module turns that opaque number into an actionable list. It collects the unresolved
 cube references and groups them by their **raw target expression** (e.g. ``vDestCube``,
 ``pTargetCube``, ``Expand('...')``), counting how often each appears and in how many
-processes. The result tells us exactly which expressions to prioritise when improving
-resolution - "you can't fix what you can't see."
+processes, and remembering **each occurrence's location** (process, block, line) so we can
+answer "which processes use this expression, and where?".
 
 It works on the same :class:`~tm1_data_dictionary.parser.references.Reference` objects the
 extractor already produces, so it needs no re-parsing logic of its own. Pure data - no TM1,
@@ -50,13 +50,23 @@ class UnresolvedGroup:
     """All occurrences of one raw target expression, aggregated."""
 
     expression: str
-    count: int = 0
-    processes: set[str] = field(default_factory=set)
-    example: UnresolvedOccurrence | None = None
+    occurrences: list[UnresolvedOccurrence] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.occurrences)
+
+    @property
+    def processes(self) -> set[str]:
+        return {o.process for o in self.occurrences}
 
     @property
     def process_count(self) -> int:
         return len(self.processes)
+
+    @property
+    def example(self) -> UnresolvedOccurrence | None:
+        return self.occurrences[0] if self.occurrences else None
 
 
 @dataclass
@@ -75,10 +85,9 @@ class DiagnosticReport:
         self.occurrences.append(occ)
         group = self.groups.get(occ.expression)
         if group is None:
-            group = UnresolvedGroup(expression=occ.expression, example=occ)
+            group = UnresolvedGroup(expression=occ.expression)
             self.groups[occ.expression] = group
-        group.count += 1
-        group.processes.add(occ.process)
+        group.occurrences.append(occ)
 
     def top(self, limit: int | None = None) -> list[UnresolvedGroup]:
         """Return groups sorted by frequency (then by expression), most common first."""
@@ -87,6 +96,16 @@ class DiagnosticReport:
             key=lambda g: (-g.count, g.expression),
         )
         return ordered[:limit] if limit is not None else ordered
+
+    def find(self, expression: str) -> list[UnresolvedOccurrence]:
+        """Return every occurrence of an exact target ``expression`` (empty string allowed).
+
+        Useful for "which processes use this expression, and on which lines?" - e.g.
+        ``find("")`` locates the blank-target parse edge cases, ``find("pCubeName")``
+        locates a parameter-driven utility.
+        """
+        group = self.groups.get(expression)
+        return list(group.occurrences) if group is not None else []
 
 
 def collect_unresolved(process: str, refs: list[Reference]) -> list[UnresolvedOccurrence]:

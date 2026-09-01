@@ -487,12 +487,22 @@ def extract(config_path: str, quiet: bool) -> None:
     default="",
     help="Diagnose a single process in detail instead of the whole model.",
 )
-def diagnose_unresolved(config_path: str, top: int, process_name: str) -> None:
+@click.option(
+    "--expression",
+    "expression",
+    default=None,
+    help='Locate every occurrence of one exact target expression (use "" for the blank target).',
+)
+def diagnose_unresolved(
+    config_path: str, top: int, process_name: str, expression: str | None
+) -> None:
     """Report which cube-target expressions stay unresolved (read-only, no writes).
 
-    Whole-model mode (default): groups unresolved cube targets by expression, sorted by
-    how often each occurs - the priorities for improving resolution. Single-process mode
-    (--process): lists that process's unresolved references with line numbers.
+    Modes:
+      * default            - whole-model "top offenders" table;
+      * --process NAME     - one process's unresolved references, with line numbers;
+      * --expression EXPR  - every process/line where EXPR is the unresolved target
+                             (pass --expression "" to find blank-target parse edge cases).
     """
     try:
         cfg = load_config(Path(config_path))
@@ -513,34 +523,42 @@ def diagnose_unresolved(config_path: str, top: int, process_name: str) -> None:
             if process_name:
                 if not reader.exists(process_name):
                     raise click.ClickException(f"Process not found: {process_name}")
-                refs = _refs_for(reader, process_name)
-                occ = collect_unresolved(process_name, refs)
+                occ = collect_unresolved(process_name, _refs_for(reader, process_name))
                 click.echo(f"Process: {process_name}")
                 click.echo(f"Unresolved cube references: {len(occ)}")
                 if occ:
                     click.echo(f"  {'BLOCK':<9} {'LINE':>5}  {'ROLE':<10} EXPRESSION")
                     click.echo(f"  {'-' * 9} {'-' * 5}  {'-' * 10} {'-' * 30}")
                     for o in occ:
-                        click.echo(
-                            f"  {o.block:<9} {o.line_no:>5}  {o.role.value:<10} {o.expression}"
-                        )
+                        expr = o.expression if o.expression != "" else "(blank)"
+                        click.echo(f"  {o.block:<9} {o.line_no:>5}  {o.role.value:<10} {expr}")
                 return
 
-            # ---- Whole-model mode ----
-            all_names = reader.list_process_names()
-            part = partition(all_names, ExclusionRules.default())
-
+            # ---- Whole-model parse (shared by the summary and --expression modes) ----
+            part = partition(reader.list_process_names(), ExclusionRules.default())
             process_refs: dict[str, list] = {}
             for name in part.included:
                 try:
                     process_refs[name] = _refs_for(reader, name)
                 except Exception as exc:  # noqa: BLE001 - isolate per-process failures
                     click.echo(f"  (skip {name}: {type(exc).__name__})")
-
             report = diagnose(process_refs)
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # ---- --expression: locate every occurrence of one expression ----
+    if expression is not None:
+        found = report.find(expression)
+        shown = expression if expression != "" else "(blank)"
+        click.echo(f"Occurrences of target expression {shown!r}: {len(found)}")
+        if found:
+            click.echo(f"  {'PROCESS':<45} {'BLOCK':<9} {'LINE':>5}  ROLE")
+            click.echo(f"  {'-' * 45} {'-' * 9} {'-' * 5}  {'-' * 10}")
+            for o in found:
+                click.echo(f"  {o.process:<45} {o.block:<9} {o.line_no:>5}  {o.role.value}")
+        return
+
+    # ---- default whole-model summary ----
     click.echo("")
     click.echo(f"Included processes analysed: {len(process_refs)}")
     click.echo(f"Total unresolved cube references: {report.total}")
@@ -551,9 +569,13 @@ def diagnose_unresolved(config_path: str, top: int, process_name: str) -> None:
     click.echo(f"  {'COUNT':>6}  {'PROCS':>5}  EXPRESSION")
     click.echo(f"  {'-' * 6}  {'-' * 5}  {'-' * 40}")
     for g in groups:
-        click.echo(f"  {g.count:>6}  {g.process_count:>5}  {g.expression}")
+        expr = g.expression if g.expression != "" else "(blank)"
+        click.echo(f"  {g.count:>6}  {g.process_count:>5}  {expr}")
     if limit is not None and len(report.groups) > limit:
         click.echo(f"  ... and {len(report.groups) - limit} more distinct expressions")
+    click.echo("")
+    click.echo('Tip: locate any expression with:  tm1dd diagnose-unresolved --expression "NAME"')
+    click.echo('     (use --expression "" to find the blank-target references)')
 
 
 if __name__ == "__main__":
