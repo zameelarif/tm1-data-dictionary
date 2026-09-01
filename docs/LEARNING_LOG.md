@@ -8,8 +8,8 @@
 > *what you learned*.
 
 **Owner:** Zameel Arif
-**Status:** current through the whole-model orchestrator (parser + rollup + cube writer +
-exclusions + `tm1dd extract`).
+**Status:** current through diagnostics (parser + rollup + cube writer + exclusions +
+`tm1dd extract` + `tm1dd diagnose-unresolved`).
 
 ---
 
@@ -67,190 +67,90 @@ exclusions + `tm1dd extract`).
 | 40 | Glob patterns (`fnmatch`) | Python | `exclusions.py` |
 | 41 | Rules with precedence | Engineering | `exclusions.py` |
 | 42 | Error isolation (resilience over optimism) | Engineering | `extract.py` orchestrator |
-| 43 | Batching for efficiency | Engineering | `extract.py` (one write, not 322) |
+| 43 | Batching for efficiency | Engineering | `extract.py` |
 | 44 | Orchestration (composing tested pieces) | Engineering | `extract.py` |
 | 45 | Callbacks (progress reporting) | Python | `extract.py` ProgressFn |
+| 46 | Scope before depth (reduce the problem first) | Engineering | widened exclusions (`}*`) |
+| 47 | Measure before you optimise | Engineering | `diagnostics.py` |
+| 48 | Aggregation / grouping / frequency counting | Python | `diagnostics.py` |
+| 49 | The limits of static analysis (runtime params) | Engineering | the `pCubeName` finding |
+| 50 | Good data models make new questions cheap | Engineering | `--expression` via stored occurrences |
 
 ---
 
-## 1-30 (foundation + write path)
+## 1-45
 
-(Concepts 1-30 cover: modules/imports, docstrings, type hints, classes, ABCs, inheritance,
-custom exceptions, `None`, dataclasses, immutability, keyword-only args, exception chaining,
-factories, pytest, `__init__`/`self`, polymorphism, indentation, YAGNI, venv auto-activation,
-lazy imports, composition, context managers, dependency injection, guard clauses, ownership,
-idempotency, separation of concerns, verify-against-docs, and TM1py cell/element writes. See
-earlier entries in this file — they remain unchanged and are summarised in the index above.)
+(Concepts 1-45 remain as previously recorded — foundation, write path, the parser, cube writer,
+and the orchestrator. See the earlier entries; they are unchanged and summarised in the index above.
+The new material for this update is concepts 46-50 below.)
 
 ---
 
-## 31. Static vs dynamic analysis
+## 46. Scope before depth (reduce the problem before solving it)
 
-**What:** *Dynamic* analysis runs code and observes it (needs a working environment, data,
-supporting objects). *Static* analysis reads code without running it (needs only the source text).
+**What:** Before pouring effort into *solving* a problem harder, ask whether you can *shrink* the
+problem first. Narrowing scope is often far higher-leverage than deepening effort.
 
-**In our code:** the whole parser is static — it reads a TI's source as text and pattern-matches.
-This is why it analysed a 492-process instance in seconds, and why it happily analyses TIs whose
-cubes do not even exist (the anonymised test loaders).
+**In our code:** the whole-model run reported 5,012 unresolved references. Instead of immediately
+trying to *resolve* more, we asked "do we even care about all these processes?" ~200 were framework
+machinery (`}APQ`, `}tp_`, `}pulse_`, ...), all `}`-prefixed. Adding one exclusion pattern (`}*`)
+dropped included processes 322 -> 117 and unresolved references 5,012 -> 133 (a 97% cut). No clever
+code - just the right scope. The remaining work became ~37x smaller and entirely relevant.
 
----
-
-## 32. Anti-corruption layer
-
-**What:** A boundary that keeps a messy external API from leaking into your clean internal code — it
-maps the external shape into your own once, in one place.
-
-**In our code:** `ti_reader.py`. TM1py exposes a process as ~25 attributes; `ti_reader` maps them once
-into a tidy `TIProcess`, so everything downstream works against our clean shape and a future TM1py
-change touches only this one file.
+**Lesson:** "reduce the problem" beats "try harder" surprisingly often. Scope first, depth second.
 
 ---
 
-## 33. String-aware scanning (state machines)
+## 47. Measure before you optimise
 
-**What:** Walking text character-by-character while tracking state (e.g. "am I inside a string?"), so
-structure is respected. You cannot treat code as plain text — strings, escapes, and nesting matter.
+**What:** Don't guess what to improve - measure it. Build the instrument that tells you where the
+problem actually is, then target the highest-impact cause.
 
-**In our code:** `strip_comment` in `blocks.py` tracks whether it is inside a `'...'` string (honouring
-the doubled-quote `''` escape) so a `#` inside a string is NOT treated as a comment. Proven on real
-code.
-
----
-
-## 34. Regex and negative lookbehind
-
-**What:** Regular expressions match text patterns. A *negative lookbehind* `(?<!...)` asserts what must
-NOT precede a match.
-
-**In our code:** `_NAME_BEFORE_PAREN` finds a whole-word function name followed by `(`. The lookbehind
-ensures `CellPutN(` matches but `MyCellPutN(` does not.
+**In our code:** `diagnostics.py` + `tm1dd diagnose-unresolved` is a "resolution profiler." Rather
+than guessing which variable patterns to teach the resolver, it lists the unresolved target
+expressions by frequency. The result was decisive: two expressions (`pCubeName`, `pTargetCube`)
+caused 77% of the misses. This is the same discipline as a performance profiler: optimise what the
+measurement proves is costly, not what you *think* is.
 
 ---
 
-## 35. Balanced-parenthesis parsing
+## 48. Aggregation / grouping / frequency counting
 
-**What:** To grab a function's arguments you cannot just "find the next `)`" — nested calls need depth
-counting. Track paren depth (ignoring parens inside strings) and split top-level commas.
+**What:** Turning a flat list of events into a grouped, counted summary - "how many of each kind,
+and which is most common?" A very common data-analysis shape.
 
-**In our code:** `_extract_arg_string` and `_split_top_level_args` in `references.py`.
-
----
-
-## 36. Correctness over coverage
-
-**What:** A lineage tool that gives a *confident wrong answer* is worse than one that says "unknown."
-Prefer a known-unknown to a wrong resolution.
-
-**In our code:** `const_prop.py` refuses to resolve a variable that is assigned conditionally, or
-differently, or via a function call. It would rather leave `(cCube)` unresolved than guess wrongly.
-The whole-model run's 5,012 "unresolved" count is this principle being honest at scale.
+**In our code:** `diagnose()` walks every unresolved occurrence and groups them by expression into
+`UnresolvedGroup`s, each counting its occurrences and the distinct processes it appears in. `top()`
+sorts groups by frequency. The pattern - collect events, key them, count per key, sort by count - is
+one you'll reuse constantly (log analysis, reporting, "top N" of anything).
 
 ---
 
-## 37. Capture facts, defer judgement
+## 49. The limits of static analysis (runtime parameters)
 
-**What:** A good dictionary captures raw facts and lets a human apply judgement where the machine
-cannot safely.
+**What:** Static analysis reads *source code*; it cannot know values that are only decided at
+*runtime*. A process parameter (`pCubeName`, `pTargetCube`) gets its value from whoever *calls* the
+process - there is no literal in the source to resolve it to.
 
-**In our code:** `assignments.py` captures *every* variable assignment so a developer can trace
-`cCube = cSourceCube = a cube read` by hand — complementing const-prop, which only auto-resolves what
-is safe.
-
----
-
-## 38. Fixpoint resolution with a cycle guard
-
-**What:** Following variable-to-variable chains to a fixed point (`cCube -> cSourceCube -> literal`),
-while guarding against cycles (`a = b; b = a`) with a "seen" set so you never loop forever.
-
-**In our code:** the transitive resolver in `const_prop.py`. It resolved all 122 `cCube` references in
-the real loader to `Food_Weekly_Sales`, while correctly refusing cycles and ambiguous sources.
+**In our code:** the diagnostic revealed that most remaining unresolved cube targets were
+`p`-prefixed parameters. Const-prop leaving them unresolved is not a bug - it is the *truth*: "this
+utility writes to whatever cube you pass it." Recognising this reframed the plan: there was little
+"resolution" work left to do, because the answer genuinely isn't in the code. Knowing the *boundary*
+of what a technique can do is as important as the technique itself.
 
 ---
 
-## 39. Lookup tables encode domain knowledge
+## 50. Good data models make new questions cheap
 
-**What:** Instead of complex per-case `if/else` logic, put the knowledge in a data table and write one
-generic piece of code that consults it. Adding a new case = adding a table entry, not changing code.
+**What:** When your data is modelled well, answering a new question is "store or read a bit more of
+what you already have," not a rewrite.
 
-**In our code:** `TARGET_ARG_INDEX` in `references.py` records which argument holds the cube/dimension
-for each function. One small table turned "this process touches vNewVal" into "this process writes to
-Food_Weekly_Sales", with no added code complexity.
-
----
-
-## 40. Glob patterns (`fnmatch`)
-
-**What:** Shell-style wildcard matching — `*` matches any run of characters, `?` any single character.
-Python's `fnmatch.fnmatch(name, pattern)` does case-insensitive-friendly glob matching.
-
-**In our code:** `exclusions.py` matches process names against patterns like `bedrock.*`, `}bedrock.*`,
-`cubewise.*`. A glob is a lightweight, readable way to say "any process whose name starts with
-bedrock." Simpler than a full regex when you only need wildcards.
-
----
-
-## 41. Rules with precedence
-
-**What:** When multiple rules could apply, the *order* they are checked matters. You define an explicit
-precedence so the outcome is predictable.
-
-**In our code:** `decide()` in `exclusions.py` checks in a fixed order: explicit-include (always wins)
--> explicit-exclude -> name patterns -> substrings -> default include. This means a genuine business
-process called `Test.Coverage.RealThing` can be force-included even though it contains "test". Encoding
-precedence explicitly (rather than hoping the checks happen to run in the right order) makes the
-behaviour intentional and testable.
-
----
-
-## 42. Error isolation (resilience over optimism)
-
-**What:** When processing many items, wrap each in its own `try/except` so one failure doesn't abort
-the whole batch. Record the failure, keep going.
-
-**Why it matters:** with 492 real, varied processes, *something* will surprise the parser. The naive
-version crashes on the first oddity and you lose the whole run. The resilient version delivers
-everything that worked and reports what didn't.
-
-**In our code:** the per-process loop in `extract.py` catches any exception, counts it, records
-`(name, error)`, and continues. The test `test_failing_process_does_not_abort_run` proves it. This is
-why the whole-model run reported "0 failures" cleanly — and *would* have kept going even if some had
-failed. Note: a broad `except Exception` is normally discouraged, but is exactly right here, where the
-goal is "one bad input must not kill the batch."
-
----
-
-## 43. Batching for efficiency
-
-**What:** Instead of many small remote calls, collect the work and make one (or a few) large calls.
-
-**In our code:** the orchestrator collects cube-lineage rows from *all* processes and writes them to
-`}Meta_Process_Cube` in a single `cells.write`, rather than 322 separate writes. Far faster against a
-real instance, and the test `test_rows_batched_into_single_write` proves only one write happens.
-
----
-
-## 44. Orchestration (composing tested pieces)
-
-**What:** Building a higher-level workflow by wiring together smaller components that are already built
-and tested — introducing very little new logic, mostly "glue" and control flow.
-
-**In our code:** `extract.py` composes `TIReader` + `code_lines` + `build_const_table` +
-`extract_references` + `rollup_cube_lineage` + `write_cube_lineage`, wrapped in exclusion filtering and
-error isolation. The hard parts were done and trusted; the orchestrator is the loop that runs them over
-the whole model. This is the payoff of building bottom-up: the whole-model command was mostly assembly.
-
----
-
-## 45. Callbacks (progress reporting)
-
-**What:** Passing a *function* as an argument, so the caller can plug in behaviour (here, "print a
-progress line") without the callee knowing or caring what it does.
-
-**In our code:** `extract_all(client, progress=...)` accepts a `ProgressFn` callback invoked per
-process as `(index, total, name, status)`. The CLI passes a function that prints a line; a test passes
-one that records calls in a list. The orchestrator doesn't know or care — it just calls the callback.
-This keeps the orchestrator decoupled from *how* progress is displayed.
+**In our code:** the first diagnostic answered "*what* patterns cause misses?" by counting per
+expression. When we then needed "*where* does expression X occur?", the change was tiny: have each
+`UnresolvedGroup` keep its list of occurrences (which it was already visiting) instead of only
+counting them, and add a `find()` method. The `--expression ""` locator (to hunt blank targets) fell
+straight out. A structure that holds the underlying facts, not just summaries, makes future questions
+cheap to answer.
 
 ---
 

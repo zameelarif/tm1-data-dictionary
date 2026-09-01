@@ -12,9 +12,9 @@
 **Project owner:** Zameel Arif
 **Target:** IBM Planning Analytics / TM1 on-premises (v11.x)
 **Repo:** private GitHub repository (`zameelarif/tm1-data-dictionary`)
-**Status:** foundation + write path + full parser + whole-model orchestrator complete.
-The tool extracts cube lineage for an entire instance in one command and writes it into
-`}Meta_Process_Cube`.
+**Status:** foundation + write path + full parser + whole-model orchestrator + exclusions +
+diagnostics complete. The tool extracts cube lineage for an entire instance in one command,
+writes it to `}Meta_Process_Cube`, and can diagnose what stays unresolved.
 
 ---
 
@@ -124,7 +124,7 @@ incrementally, each stage tested, and validated against real code.
 ## F1. ti_reader.py — the input layer (anti-corruption layer)
 - Reads a TI via TM1py and repackages its ~25 attributes into a tidy `TIProcess`, plus a `TIReader`
   (`list_process_names`/`exists`/`read`). Insulates the whole parser from TM1py's attribute names.
-  Verified the Process API against the docs. `tm1dd inspect-process` shows any TI's shape.
+  `tm1dd inspect-process` shows any TI's shape.
 
 ## F2. blocks.py — segmentation + string-aware comment stripping
 - Splits blocks into numbered `CodeLine`s, stripping `#` comments with a character scanner that
@@ -132,29 +132,24 @@ incrementally, each stage tested, and validated against real code.
   ignored commented-out `CellPutN` lines a naive parser would have miscounted.
 
 ## F3. references.py — the first genuine lineage
-- Finds calls to the TI functions we care about (cube writes/reads, dim updates, attribute writes,
-  chains, external), using whole-word regex matching and balanced-paren argument extraction. Ran
-  against the Cubewise Day GL/Wholesale loaders and the anonymised mapping-cube loader (406
-  references from 1,500 lines, instantly).
+- Finds calls to the TI functions we care about, using whole-word regex matching and balanced-paren
+  argument extraction. Ran against the Cubewise Day loaders and the anonymised mapping-cube loader
+  (406 references from 1,500 lines, instantly).
 
 ## F4. const_prop.py — resolve variables to real names (transitive)
 - Builds a safe variable->literal table. Resolves direct literals, follows single-variable chains
-  **transitively** to a fixed point (with a cycle guard), and handles simple concatenation. Refuses to
-  resolve anything conditional/varying/function-derived — correctness over coverage. Proven: resolved
-  all 122 `cCube` references in the real loader to `Food_Weekly_Sales`, `cMappingCube` to `DW_Mapping`.
+  transitively to a fixed point (with a cycle guard), handles simple concatenation. Refuses to
+  resolve anything conditional/varying/function-derived — correctness over coverage. Resolved all
+  122 `cCube` references in the real loader to `Food_Weekly_Sales`, `cMappingCube` to `DW_Mapping`.
 
 ## F5. assignments.py — the variable dictionary (owner's idea)
-- Captures *every* variable assignment (RHS, block, line, literal?, in-control-flow?) with a
-  per-variable "derived from" summary. `tm1dd show-vars`. Where const-prop won't safely resolve a
-  variable, a developer can see how it got its value (e.g. `cCube = cSource_Cube = 'Food_Weekly_Sales'`).
-  Feeds the spec's `}Meta_Process_Variable.DerivedFrom`.
+- Captures *every* variable assignment with a per-variable "derived from" summary. `tm1dd show-vars`.
+  Where const-prop won't safely resolve a variable, a developer can see how it got its value.
 
 ## F6. Function-aware target selection
 - A `TARGET_ARG_INDEX` table records which argument holds the cube/dimension per function
-  (`CellPutN`->1, `CellGetN`->0, `AttrPutS`->1, ...). Before this, writes reported the *value*
-  variable; after, they report the *cube*. Result on the real loader: all 140 writes ->
-  `Food_Weekly_Sales`, all 122 mapping reads -> `DW_Mapping`, 13 chains -> real process names.
-  Complete, correct, production-grade lineage.
+  (`CellPutN`->1, `CellGetN`->0, `AttrPutS`->1). Before this, writes reported the *value* variable;
+  after, they report the *cube*. Result on the real loader: complete, correct lineage.
 
 ---
 
@@ -162,60 +157,92 @@ incrementally, each stage tested, and validated against real code.
 
 ## G1. rollup.py — deduplicate references into lineage rows
 - Groups cube reads/writes by (resolved cube, role), counting occurrences and keeping the first line.
-  140 identical writes become one row: "writes to Food_Weekly_Sales, count=140, first=Data:194". Only
-  references that resolve to a named cube are included; still-dynamic ones are counted as "unresolved."
+  Only references that resolve to a named cube are included; still-dynamic ones counted as unresolved.
 
 ## G2. process_cube_writer.py — write to }Meta_Process_Cube
-- Ensures the process/cube/role elements exist, then writes the measure cells (Count, FirstBlock,
-  FirstLine). Dry-run guarded, idempotent, lazy TM1py import. Added `}Meta_Process_Cube` and its
-  dimensions to `schema.py`/bootstrap.
-- **Milestone:** `tm1dd extract-cube "..."` wrote a single process's lineage into `}Meta_Process_Cube`,
-  and it was sliced in PAfE — the first queryable lineage inside TM1.
+- Ensures process/cube/role elements exist, writes measure cells (Count, FirstBlock, FirstLine).
+  Dry-run guarded, idempotent, lazy TM1py import. `tm1dd extract-cube "..."` wrote one process's
+  lineage and it was sliced in PAfE — the first queryable lineage inside TM1.
 
 ---
 
 # Part H — Whole-Model Orchestrator
 
 ## H1. exclusions.py — which processes to include
-- Applies Bedrock/utility glob patterns and test/temp substrings, with explicit include/exclude lists
-  (explicit-include wins). Every exclusion is *recorded* with its reason, never silently dropped.
+- Applies glob patterns and substrings, with explicit include/exclude lists (explicit-include wins).
+  Every exclusion is *recorded* with its reason, never silently dropped.
 
 ## H2. extract.py — the orchestrator ("whole model in one command")
-- Loops all processes, applies exclusions, parses each, and batches the writes. Two design points:
-  **per-process error isolation** (one malformed process is counted/reported and the loop continues —
-  it must not abort the run) and **batched writing** (collect all rows, write once). Full
-  clear-and-reload (verified TM1py `cells.clear(cube=...)` against the docs). Dry-run aware. Returns an
-  `ExtractionSummary` for the CLI and audit cube. `tm1dd extract` is the command.
+- Loops all processes, applies exclusions, parses each, batches the writes. Per-process error
+  isolation (one bad process is counted/reported, loop continues) and batched writing. Full
+  clear-and-reload (verified TM1py `cells.clear(cube=...)`). Dry-run aware. Returns an
+  `ExtractionSummary`. `tm1dd extract` is the command.
 
-## H3. Whole-model milestone (proven on the local instance)
-- `tm1dd extract` ran against the local "Cubewise Day" instance:
-  - **492 processes total, 322 included, 170 excluded, 0 failures.**
-  - **271 cube-lineage rows written.**
-  - **5,012 cube references unresolved** (stayed dynamic — the roadmap for resolution improvements).
-- Sliced `}Meta_Process_Cube` with `}Meta_Cube` on the rows -> impact analysis across the whole model
-  ("which processes write to cube X?"). The tool is now a working data dictionary of the instance.
+## H3. First whole-model run
+- 492 processes total, 322 included, 170 excluded, 0 failures, 271 cube rows written,
+  **5,012 references unresolved**. Sliced `}Meta_Process_Cube` with `}Meta_Cube` on the rows ->
+  impact analysis across the model.
+
+## H4. Widened exclusions — scope before depth
+- **Insight (owner):** do exclusions first, then there's less to diagnose. Most of the "included"
+  set was framework machinery (`}APQ.*` Pulse, `}tp_*` planning sample, `}pulse_*`, `}src_*`,
+  `}Drill_*`) - all `}`-prefixed control objects a dictionary should never analyse.
+- **Change:** added `}*` as the leading default exclusion pattern (business processes are never
+  `}`-prefixed; `explicit_include` remains the escape hatch). Added `excluded_by_rule()` reporting.
+- **Result:** re-run dropped included from 322 -> **117**, excluded 170 -> **375**, and unresolved
+  from **5,012 -> 133 (a 97% reduction)**. The remaining 117 are real business processes, and the
+  remaining unresolved references are the ones that actually matter. Reducing scope first made the
+  depth work ~37x smaller.
+
+---
+
+# Part I — Diagnostics (measure before you optimise)
+
+## I1. diagnostics.py — turn "unresolved" into a prioritised list
+- **What:** collects the unresolved cube references (cube reads/writes whose target stayed dynamic),
+  groups them by raw target expression, and counts how often each appears and in how many processes.
+  `tm1dd diagnose-unresolved` (whole-model top offenders; `--process` for one process's detail).
+- **Why:** you can't fix what you can't see. Rather than guessing what to improve, measure which
+  expressions cause the misses so any resolution work targets the highest-frequency real problems.
+- **Result on the 117-process model:** the 133 unresolved references were dominated by
+  **runtime parameters** - `pCubeName` (56) and `pTargetCube` (46) alone were 77% of the total, plus
+  `sProcLogCube` (19) and a few small ones, and a tiny **blank-target** group (3, in 2 processes).
+- **Key finding:** most of the remaining "unresolved" are `p`-prefixed **parameters** - the cube is
+  supplied at *runtime* by the caller, so there is no literal in the source to resolve to. Const-prop
+  correctly leaving them unresolved is the *truth* ("this utility writes to whatever cube you pass"),
+  not a failure. This reframed "step 1: improve resolution" as mostly *not applicable* - the cube
+  lineage is already about as complete as static analysis can make it for these processes.
+
+## I2. --expression filter — from "what" to "where"
+- **What:** enhanced each `UnresolvedGroup` to remember its full list of occurrences
+  (process/block/line), added `report.find(expression)`, and a CLI `--expression "..."` mode that
+  lists every process+line where an exact expression is the unresolved target
+  (`--expression ""` locates the blank-target parse edge cases).
+- **Why:** turn the diagnostic from a summary into an investigation tool - "which processes use this,
+  and where?" The design made this cheap: the report already grouped by expression, so we just had
+  each group store its occurrences instead of only counting them.
+- **Result:** used to hunt the blank-target references to their exact source lines (in progress) so
+  we can fix the small parse edge case producing empty targets.
 
 ---
 
 # Current State
 
-- Foundation, write path, full parser, cube writer, and whole-model orchestrator complete.
-- `tm1dd extract` analyses an entire instance in one command with zero-failure robustness.
-- ~240 tests, all green; ruff/black/mypy clean; everything committed and pushed.
+- Foundation, write path, full parser, cube writer, whole-model orchestrator, widened exclusions,
+  and diagnostics all complete. ~206 tests, all green; ruff/black/mypy clean; committed and pushed.
+- Whole-model run: 117 business processes, 271 cube rows, 133 unresolved (mostly runtime parameters).
 
-## Next planned steps (agreed order: 3 -> 2 -> 1)
+## Next planned steps
 
-1. **(step 3) Diagnostic for the 5,012 unresolved references** — a mode (e.g. `--show-unresolved`)
-   that lists *which* cube references stayed dynamic and their raw targets, so we can see the patterns
-   to prioritise. "You can't fix what you can't see."
-2. **(step 2) `}Meta_Process_Chain` writer** — fold chain lineage into the same orchestrator loop, so
-   the tool answers "what triggers what? / what breaks if I retire this process?" (chain targets are
-   usually literal process names, so this is a quick, high-yield broadening).
-3. **(step 1) Attack the 5,012** — improve const-prop / targeting for the common unresolved patterns
-   surfaced by the diagnostic; each fix lifts resolution across all included processes at once.
-
-Later: deployment packaging (the "easy deploy & run" story), then the remaining `}Meta_*` cubes
-(dimension/element/attribute lineage, control flow, runtime log stats) per the spec.
+1. **Fix the blank-target parse edge case** (small; found via `--expression ""`).
+2. **Decide parameter handling** — optionally record parameter-driven targets as
+   "writes to a cube given by parameter pCubeName" (useful lineage for utility processes) rather than
+   leaving them out. Product decision.
+3. **`}Meta_Process_Chain` writer (step 2)** — fold chain lineage into the orchestrator loop so the
+   tool answers "what triggers what? / what breaks if I retire this process?" (chain targets are
+   usually literal process names, so a quick, high-yield broadening).
+- Later: deployment packaging, then the remaining `}Meta_*` cubes (dimension/element/attribute
+  lineage, control flow, runtime log stats) per the spec.
 
 ---
 
