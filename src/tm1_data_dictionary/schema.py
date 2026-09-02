@@ -82,6 +82,16 @@ DIM_PROCESS_CALLEE = "}Meta_Process_Callee"
 DIM_PROCESS_CHAIN_MEASURE = "}Meta_ProcessChainMeasure"
 CUBE_PROCESS_CHAIN = "}Meta_Process_Chain"
 
+DIM_DATASOURCE = "}Meta_Datasource"
+DIM_DATASOURCE_MEASURE = "}Meta_DatasourceMeasure"
+CUBE_PROCESS_DATASOURCE = "}Meta_Process_Datasource"
+
+# Measures for }Meta_Process_Datasource.
+DATASOURCE_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("SourceType", STRING),  # File | ODBC | View | Other
+    ElementDef("Detail", STRING),  # query (ODBC) or owning cube (view)
+)
+
 # Measures for }Meta_Process_Chain.
 PROCESS_CHAIN_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Count", NUMERIC),
@@ -168,5 +178,24 @@ def process_chain_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(caller_dim, callee_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_datasource_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Datasource and its key dimensions.
+
+    Dimensioned }Meta_Process x }Meta_Datasource x }Meta_DatasourceMeasure. The datasource
+    dimension holds recognisable source names; the writer populates it at run time.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    source_dim = DimensionDef(DIM_DATASOURCE, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_DATASOURCE_MEASURE, DATASOURCE_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_DATASOURCE,
+        (DIM_PROCESS, DIM_DATASOURCE, DIM_DATASOURCE_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, source_dim, measure_dim),
         cubes=(cube,),
     )

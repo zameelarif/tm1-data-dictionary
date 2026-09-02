@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Zameel Arif", email = "your-email@cubewise.com" },
+    { name = "Zameel Arif", email = "zarif@cubewise.com" },
 ]
 keywords = ["tm1", "planning-analytics", "data-dictionary", "lineage"]
 classifiers = [

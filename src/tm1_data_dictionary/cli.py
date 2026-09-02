@@ -18,15 +18,22 @@ from tm1_data_dictionary.credentials import (
 )
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
+from tm1_data_dictionary.graph import build_graph, render_html
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.chain_rollup import rollup_chain_lineage
 from tm1_data_dictionary.parser.const_prop import build_const_table
+from tm1_data_dictionary.parser.datasource_rollup import datasource_row
 from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
-from tm1_data_dictionary.schema import audit_schema, process_chain_schema, process_cube_schema
+from tm1_data_dictionary.schema import (
+    audit_schema,
+    process_chain_schema,
+    process_cube_schema,
+    process_datasource_schema,
+)
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
@@ -107,10 +114,11 @@ def bootstrap(config_path: str) -> None:
             r1 = ensure_schema(client, audit_schema())
             r2 = ensure_schema(client, process_cube_schema())
             r3 = ensure_schema(client, process_chain_schema())
+            r4 = ensure_schema(client, process_datasource_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    for result in (r1, r2, r3):
+    for result in (r1, r2, r3, r4):
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
         for name in result.dimensions_skipped:
@@ -120,7 +128,7 @@ def bootstrap(config_path: str) -> None:
         for name in result.cubes_skipped:
             click.echo(f"  exists  cube       {name}")
 
-    if r1.created_anything or r2.created_anything or r3.created_anything:
+    if r1.created_anything or r2.created_anything or r3.created_anything or r4.created_anything:
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
@@ -627,6 +635,89 @@ def extract_chain(name: str, config_path: str) -> None:
             click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command(name="export-graph")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default="data_flow.html",
+    show_default=True,
+    help="Output HTML file path.",
+)
+@click.option(
+    "--title",
+    default="TM1 Data Flow",
+    show_default=True,
+    help="Title shown at the top of the page.",
+)
+@click.option(
+    "--vis-js",
+    "vis_js_path",
+    default="",
+    help="Path to a local vis-network.min.js to inline for a fully offline file.",
+)
+def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) -> None:
+    """Export an interactive HTML data-flow map (processes, cubes, reads/writes/triggers)."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    def _refs_for(reader: TIReader, name: str) -> list:
+        ti = reader.read(name)
+        lines = code_lines(ti)
+        const_table = build_const_table(lines)
+        return extract_references(lines, const_table=const_table)
+
+    cube_rows: list = []
+    chain_rows: list = []
+    ds_rows = []
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            part = partition(reader.list_process_names(), ExclusionRules.default())
+            click.echo(f"Parsing {len(part.included)} processes for the data-flow map...")
+            for name in part.included:
+                try:
+                    ti = reader.read(name)
+                    lines = code_lines(ti)
+                    const_table = build_const_table(lines)
+
+                    refs = extract_references(lines, const_table=const_table)
+                    cube_rows.extend(rollup_cube_lineage(name, refs).rows)
+                    chain_rows.extend(rollup_chain_lineage(name, refs).rows)
+                    d = datasource_row(name, getattr(ti, "datasource", None))
+                    if d is not None:
+                        ds_rows.append(d)
+
+                except Exception as exc:  # noqa: BLE001 - isolate per-process failures
+                    click.echo(f"  (skip {name}: {type(exc).__name__})")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    vis_js = ""
+    if vis_js_path:
+        vis_js = Path(vis_js_path).read_text(encoding="utf-8")
+
+    graph = build_graph(cube_rows, chain_rows, ds_rows)
+    html_text = render_html(graph, title=title, vis_js=vis_js)
+    Path(out_path).write_text(html_text, encoding="utf-8")
+
+    click.echo(
+        f"Wrote {out_path}: {len(graph.process_ids())} processes, "
+        f"{len(graph.cube_ids())} cubes, {graph.edge_count} relationships."
+    )
+    if not vis_js:
+        click.echo("Open it in a browser. (First load fetches vis-network from a CDN; ")
+        click.echo(" pass --vis-js path\\to\\vis-network.min.js to make it fully offline.)")
 
 
 if __name__ == "__main__":

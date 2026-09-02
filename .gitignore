@@ -37,3 +37,8 @@ out/
 # Config with secrets
 config.yaml
 !config.yaml.example
+
+
+#html files
+data_flow.html
+vis-network.min.js
