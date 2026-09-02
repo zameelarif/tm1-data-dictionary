@@ -26,7 +26,7 @@ from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
-from tm1_data_dictionary.schema import audit_schema, process_cube_schema
+from tm1_data_dictionary.schema import audit_schema, process_chain_schema, process_cube_schema
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
@@ -106,10 +106,11 @@ def bootstrap(config_path: str) -> None:
         with TM1Client(cfg) as client:
             r1 = ensure_schema(client, audit_schema())
             r2 = ensure_schema(client, process_cube_schema())
+            r3 = ensure_schema(client, process_chain_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    for result in (r1, r2):
+    for result in (r1, r2, r3):
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
         for name in result.dimensions_skipped:
@@ -119,7 +120,7 @@ def bootstrap(config_path: str) -> None:
         for name in result.cubes_skipped:
             click.echo(f"  exists  cube       {name}")
 
-    if r1.created_anything or r2.created_anything:
+    if r1.created_anything or r2.created_anything or r3.created_anything:
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
