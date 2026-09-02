@@ -20,6 +20,7 @@ from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
+from tm1_data_dictionary.parser.chain_rollup import rollup_chain_lineage
 from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
 from tm1_data_dictionary.parser.references import extract_references
@@ -28,6 +29,7 @@ from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.schema import audit_schema, process_cube_schema
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
+from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
 
@@ -576,6 +578,54 @@ def diagnose_unresolved(
     click.echo("")
     click.echo('Tip: locate any expression with:  tm1dd diagnose-unresolved --expression "NAME"')
     click.echo('     (use --expression "" to find the blank-target references)')
+
+
+@main.command(name="extract-chain")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def extract_chain(name: str, config_path: str) -> None:
+    """Parse a TI's chain dependencies and write them into }Meta_Process_Chain."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+
+            lines = code_lines(ti)
+            const_table = build_const_table(lines)
+            refs = extract_references(lines, const_table=const_table)
+            result = rollup_chain_lineage(ti.name, refs)
+
+            click.echo(f"Process: {ti.name}")
+            click.echo(f"Chain dependencies: {len(result.rows)}")
+            for row in result.rows:
+                click.echo(
+                    f"  triggers {row.callee:<50} "
+                    f"count={row.count}  first={row.first_block}:{row.first_line}"
+                )
+            if result.unresolved_count:
+                click.echo(f"  ({result.unresolved_count} chain calls stayed dynamic, not written)")
+
+            if client.dry_run:
+                click.echo("Dry-run: nothing written.")
+                return
+
+            written = write_chain_lineage(client, list(result.rows))
+            click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

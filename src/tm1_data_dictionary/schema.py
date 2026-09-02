@@ -78,6 +78,17 @@ DIM_ROLE = "}Meta_Role"
 DIM_PROCESS_CUBE_MEASURE = "}Meta_ProcessCubeMeasure"
 CUBE_PROCESS_CUBE = "}Meta_Process_Cube"
 
+DIM_PROCESS_CALLEE = "}Meta_Process_Callee"
+DIM_PROCESS_CHAIN_MEASURE = "}Meta_ProcessChainMeasure"
+CUBE_PROCESS_CHAIN = "}Meta_Process_Chain"
+
+# Measures for }Meta_Process_Chain.
+PROCESS_CHAIN_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),
+    ElementDef("FirstBlock", STRING),
+    ElementDef("FirstLine", NUMERIC),
+)
+
 # The roles the cube-lineage writer can record (seed elements for }Meta_Role).
 CUBE_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
     ElementDef("CubeRead", STRING),
@@ -137,5 +148,25 @@ def process_cube_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(process_dim, cube_dim, role_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_chain_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Chain and its key dimensions.
+
+    }Meta_Process_Chain is dimensioned Caller(}Meta_Process) x Callee(}Meta_Process_Callee)
+    x Measure. Caller and callee dimensions start with the seed element; the writer adds
+    real process names as chains are discovered.
+    """
+    caller_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    callee_dim = DimensionDef(DIM_PROCESS_CALLEE, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_PROCESS_CHAIN_MEASURE, PROCESS_CHAIN_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_CHAIN,
+        (DIM_PROCESS, DIM_PROCESS_CALLEE, DIM_PROCESS_CHAIN_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(caller_dim, callee_dim, measure_dim),
         cubes=(cube,),
     )
