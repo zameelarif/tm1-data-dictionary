@@ -39,12 +39,13 @@ from tm1_data_dictionary.parser.rollup import CubeLineageRow
 NODE_PROCESS = "process"
 NODE_CUBE = "cube"
 NODE_DATASOURCE = "datasource"
-
+NODE_CHORE = "chore"
 # Edge kinds.
 EDGE_WRITE = "writes"
 EDGE_READ = "reads"
 EDGE_TRIGGER = "triggers"
 EDGE_FEEDS = "feeds"
+EDGE_RUNS = "runs"
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,9 @@ class GraphData:
                 source=source, target=target, kind=kind, count=existing.count + count
             )
 
+    def chore_ids(self) -> set[str]:
+        return {n.node_id for n in self.nodes.values() if n.kind == NODE_CHORE}
+
     @property
     def node_count(self) -> int:
         return len(self.nodes)
@@ -118,10 +122,15 @@ def _datasource_id(name: str) -> str:
     return f"{NODE_DATASOURCE}:{name}"
 
 
+def _chore_id(name: str) -> str:
+    return f"{NODE_CHORE}:{name}"
+
+
 def build_graph(
     cube_rows: list[CubeLineageRow],
     chain_rows: list[ChainRow],
     datasource_rows: list[DatasourceRow] | None = None,
+    chore_rows=None,
 ) -> GraphData:
     """Build a :class:`GraphData` from cube-, chain-, and datasource-lineage rows.
 
@@ -156,6 +165,13 @@ def build_graph(
         # Data flows from the source INTO the process.
         graph._add_edge(d_id, p_id, EDGE_FEEDS, 1)
 
+    for chore_row in chore_rows or []:
+        ch_id = _chore_id(chore_row.chore)
+        p_id = _process_id(chore_row.process)
+        graph._add_node(ch_id, chore_row.chore, NODE_CHORE)
+        graph._add_node(p_id, chore_row.process, NODE_PROCESS)
+        graph._add_edge(ch_id, p_id, EDGE_RUNS, 1)  # chore runs process
+
     return graph
 
 
@@ -168,12 +184,14 @@ _NODE_STYLE: dict[str, dict[str, object]] = {
     NODE_PROCESS: {"shape": "ellipse", "color": "#4C78A8"},
     NODE_CUBE: {"shape": "box", "color": "#F58518"},
     NODE_DATASOURCE: {"shape": "database", "color": "#72B7B2"},
+    NODE_CHORE: {"shape": "star", "color": "#9D755D"},
 }
 _EDGE_STYLE: dict[str, dict[str, object]] = {
     EDGE_WRITE: {"color": "#54A24B", "dashes": False},
     EDGE_READ: {"color": "#B279A2", "dashes": True},
     EDGE_TRIGGER: {"color": "#E45756", "dashes": False},
     EDGE_FEEDS: {"color": "#72B7B2", "dashes": False},
+    EDGE_RUNS: {"color": "#9D755D", "dashes": False},
 }
 
 _CDN_VIS = "https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"
@@ -224,6 +242,7 @@ def render_html(graph: GraphData, *, title: str = "TM1 Data Flow", vis_js: str =
     n_proc = len(graph.process_ids())
     n_cube = len(graph.cube_ids())
     n_src = len(graph.datasource_ids())
+    n_chore = len(graph.chore_ids())
 
     vis_script = f"<script>{vis_js}</script>" if vis_js else f'<script src="{_CDN_VIS}"></script>'
 
@@ -251,8 +270,9 @@ def render_html(graph: GraphData, *, title: str = "TM1 Data Flow", vis_js: str =
 <body>
 <div id="header">
   <h1>{safe_title}</h1>
-  <div class="meta">{n_proc} processes &middot; {n_cube} cubes &middot; {n_src} datasources
-       &middot; {graph.edge_count} relationships</div>
+<div class="meta">{n_proc} processes &middot; {n_cube} cubes &middot; {n_src} datasources
+    &middot; {n_chore} chores &middot; {graph.edge_count} relationships</div>
+
 </div>
 <div id="legend">
   <span><span class="swatch" style="background:#4C78A8"></span>Process</span>

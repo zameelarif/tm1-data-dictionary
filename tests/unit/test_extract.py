@@ -1,4 +1,4 @@
-"""Unit tests for the whole-model orchestrator (cube + chain + datasource lineage)."""
+"""Unit tests for the whole-model orchestrator (cube + chain + datasource + chore)."""
 
 from __future__ import annotations
 
@@ -25,12 +25,29 @@ class _FakeProcesses:
 class _FakeTI:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.datasource = None  # overridden per test via patched datasource_row
+        self.datasource = None
+
+
+class _FakeChores:
+    def get_all(self):
+        return []  # no chores by default; chore behaviour is tested in test_chore_reader
+
+
+class _FakeCells:
+    """A minimal cells stub so clear_* helpers don't blow up in the orchestrator."""
+
+    def clear(self, **kwargs) -> None:  # noqa: ANN003
+        pass
+
+    def write(self, **kwargs) -> None:  # noqa: ANN003
+        pass
 
 
 class _FakeService:
     def __init__(self, names: list[str]) -> None:
         self.processes = _FakeProcesses(names)
+        self.chores = _FakeChores()
+        self.cells = _FakeCells()
 
 
 class _FakeClient:
@@ -79,9 +96,11 @@ def patched_pipeline(monkeypatch: pytest.MonkeyPatch):
         "cube_cleared": False,
         "chain_cleared": False,
         "ds_cleared": False,
+        "chore_cleared": False,
         "cube_written": [],
         "chain_written": [],
         "ds_written": [],
+        "chore_written": [],
     }
 
     monkeypatch.setattr(extract_mod, "code_lines", lambda _ti: [])
@@ -111,26 +130,33 @@ def patched_pipeline(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(extract_mod, "clear_process_cube", _clear("cube_cleared"))
     monkeypatch.setattr(extract_mod, "clear_process_chain", _clear("chain_cleared"))
     monkeypatch.setattr(extract_mod, "clear_process_datasource", _clear("ds_cleared"))
+    monkeypatch.setattr(extract_mod, "clear_chore_process", _clear("chore_cleared"))
 
-    def fake_write_cube(_c, rows):
-        state["cube_written"].append(list(rows))
-        return len(rows)
+    def _writer(key):
+        def _w(_c, rows):
+            state[key].append(list(rows))
+            return len(rows)
 
-    def fake_write_chain(_c, rows):
-        state["chain_written"].append(list(rows))
-        return len(rows)
+        return _w
 
-    def fake_write_ds(_c, rows):
-        state["ds_written"].append(list(rows))
-        return len(rows)
+    monkeypatch.setattr(extract_mod, "write_cube_lineage", _writer("cube_written"))
+    monkeypatch.setattr(extract_mod, "write_chain_lineage", _writer("chain_written"))
+    monkeypatch.setattr(extract_mod, "write_datasource_lineage", _writer("ds_written"))
+    monkeypatch.setattr(extract_mod, "write_chore_lineage", _writer("chore_written"))
 
-    monkeypatch.setattr(extract_mod, "write_cube_lineage", fake_write_cube)
-    monkeypatch.setattr(extract_mod, "write_chain_lineage", fake_write_chain)
-    monkeypatch.setattr(extract_mod, "write_datasource_lineage", fake_write_ds)
+    # Chores read to empty by default (chore-reading logic is tested in test_chore_reader).
+    class _EmptyChoreReader:
+        def __init__(self, _client) -> None:
+            pass
+
+        def read_all(self):
+            return []
+
+    monkeypatch.setattr(extract_mod, "ChoreReader", _EmptyChoreReader)
     return state
 
 
-def test_basic_run_writes_all_three(patched_pipeline) -> None:
+def test_basic_run_writes_all(patched_pipeline) -> None:
     client = _FakeClient(["A.Load", "B.Load"])
     summary = extract_mod.extract_all(client)
     assert summary.parsed_ok == 2
@@ -140,6 +166,7 @@ def test_basic_run_writes_all_three(patched_pipeline) -> None:
     assert patched_pipeline["cube_cleared"] is True
     assert patched_pipeline["chain_cleared"] is True
     assert patched_pipeline["ds_cleared"] is True
+    assert patched_pipeline["chore_cleared"] is True
 
 
 def test_process_without_datasource_contributes_no_ds_row(patched_pipeline) -> None:
@@ -147,7 +174,7 @@ def test_process_without_datasource_contributes_no_ds_row(patched_pipeline) -> N
     client = _FakeClient(["A.Load", "B.Load"])
     summary = extract_mod.extract_all(client)
     assert summary.datasource_rows_written == 0
-    assert summary.cube_rows_written == 2  # cube/chain unaffected
+    assert summary.cube_rows_written == 2
 
 
 def test_exclusions_applied(patched_pipeline) -> None:
@@ -163,7 +190,7 @@ def test_failing_process_does_not_abort(patched_pipeline) -> None:
     summary = extract_mod.extract_all(client)
     assert summary.parsed_ok == 2
     assert summary.failed == 1
-    assert summary.datasource_rows_written == 2  # A and C only
+    assert summary.datasource_rows_written == 2
 
 
 def test_batched_single_write_each(patched_pipeline) -> None:
@@ -179,18 +206,19 @@ def test_dry_run_writes_nothing(patched_pipeline) -> None:
     summary = extract_mod.extract_all(client)
     assert summary.dry_run is True
     assert summary.cube_rows_written == 2
-    assert summary.datasource_rows_written == 2  # what WOULD be written
+    assert summary.datasource_rows_written == 2
     assert patched_pipeline["cube_cleared"] is False
-    assert patched_pipeline["ds_cleared"] is False
+    assert patched_pipeline["chore_cleared"] is False
     assert patched_pipeline["ds_written"] == []
 
 
-def test_summary_lines_mention_datasource(patched_pipeline) -> None:
+def test_summary_lines_mention_all(patched_pipeline) -> None:
     client = _FakeClient(["A.Load"])
     text = "\n".join(extract_mod.extract_all(client).as_lines())
     assert "Cube-lineage rows" in text
     assert "Chain-lineage rows" in text
     assert "Datasource rows" in text
+    assert "Chore rows" in text
 
 
 def test_custom_rules(patched_pipeline) -> None:

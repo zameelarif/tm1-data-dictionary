@@ -99,6 +99,17 @@ PROCESS_CHAIN_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("FirstLine", NUMERIC),
 )
 
+DIM_CHORE = "}Meta_Chore"
+DIM_CHORE_PROCESS_MEASURE = "}Meta_ChoreProcessMeasure"
+CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
+
+# Measures for }Meta_Chore_Process.
+CHORE_PROCESS_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("StepOrder", NUMERIC),  # 0-based execution order within the chore
+    ElementDef("Active", STRING),  # Yes | No
+    ElementDef("Frequency", STRING),  # e.g. P1DT0H0M0S
+)
+
 # The roles the cube-lineage writer can record (seed elements for }Meta_Role).
 CUBE_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
     ElementDef("CubeRead", STRING),
@@ -197,5 +208,24 @@ def process_datasource_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(process_dim, source_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def chore_process_schema() -> SchemaDef:
+    """Return the schema for }Meta_Chore_Process and its key dimensions.
+
+    Dimensioned }Meta_Chore x }Meta_Process x }Meta_ChoreProcessMeasure. The chore
+    dimension holds chore names; the writer populates it at run time.
+    """
+    chore_dim = DimensionDef(DIM_CHORE, (SEED_ELEMENT,))
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_CHORE_PROCESS_MEASURE, CHORE_PROCESS_MEASURES)
+    cube = CubeDef(
+        CUBE_CHORE_PROCESS,
+        (DIM_CHORE, DIM_PROCESS, DIM_CHORE_PROCESS_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(chore_dim, process_dim, measure_dim),
         cubes=(cube,),
     )

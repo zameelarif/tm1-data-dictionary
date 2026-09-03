@@ -9,6 +9,7 @@ import click
 
 from tm1_data_dictionary import __version__
 from tm1_data_dictionary.bootstrap import ensure_schema
+from tm1_data_dictionary.chore_reader import ChoreReader
 from tm1_data_dictionary.config import ConfigError, load_config
 from tm1_data_dictionary.credentials import (
     KEYRING_SERVICE_NAME,
@@ -30,6 +31,7 @@ from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.schema import (
     audit_schema,
+    chore_process_schema,
     process_chain_schema,
     process_cube_schema,
     process_datasource_schema,
@@ -38,6 +40,8 @@ from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
+
+SCHEMA_VERSION = "1.1"
 
 
 @click.group()
@@ -115,10 +119,12 @@ def bootstrap(config_path: str) -> None:
             r2 = ensure_schema(client, process_cube_schema())
             r3 = ensure_schema(client, process_chain_schema())
             r4 = ensure_schema(client, process_datasource_schema())
+            r5 = ensure_schema(client, chore_process_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    for result in (r1, r2, r3, r4):
+    results = (r1, r2, r3, r4, r5)
+    for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
         for name in result.dimensions_skipped:
@@ -128,13 +134,10 @@ def bootstrap(config_path: str) -> None:
         for name in result.cubes_skipped:
             click.echo(f"  exists  cube       {name}")
 
-    if r1.created_anything or r2.created_anything or r3.created_anything or r4.created_anything:
+    if any(r.created_anything for r in results):
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
-
-
-SCHEMA_VERSION = "1.1"
 
 
 @main.command(name="record-run")
@@ -434,6 +437,54 @@ def extract_cube(name: str, config_path: str) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@main.command(name="extract-chain")
+@click.argument("name")
+@click.option(
+    "--config",
+    "config_path",
+    default="config.yaml",
+    show_default=True,
+    help="Path to config.yaml.",
+)
+def extract_chain(name: str, config_path: str) -> None:
+    """Parse a TI's chain dependencies and write them into }Meta_Process_Chain."""
+    try:
+        cfg = load_config(Path(config_path))
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with TM1Client(cfg) as client:
+            reader = TIReader(client)
+            if not reader.exists(name):
+                raise click.ClickException(f"Process not found: {name}")
+            ti = reader.read(name)
+
+            lines = code_lines(ti)
+            const_table = build_const_table(lines)
+            refs = extract_references(lines, const_table=const_table)
+            result = rollup_chain_lineage(ti.name, refs)
+
+            click.echo(f"Process: {ti.name}")
+            click.echo(f"Chain dependencies: {len(result.rows)}")
+            for row in result.rows:
+                click.echo(
+                    f"  triggers {row.callee:<50} "
+                    f"count={row.count}  first={row.first_block}:{row.first_line}"
+                )
+            if result.unresolved_count:
+                click.echo(f"  ({result.unresolved_count} chain calls stayed dynamic, not written)")
+
+            if client.dry_run:
+                click.echo("Dry-run: nothing written.")
+                return
+
+            written = write_chain_lineage(client, list(result.rows))
+            click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command(name="extract")
 @click.option(
     "--config",
@@ -449,7 +500,7 @@ def extract_cube(name: str, config_path: str) -> None:
     help="Suppress per-process progress lines (show only the summary).",
 )
 def extract(config_path: str, quiet: bool) -> None:
-    """Extract cube lineage for EVERY process in the instance into }Meta_Process_Cube.
+    """Extract cube, chain, datasource, and chore lineage for EVERY process in the instance.
 
     Applies exclusion rules (Bedrock/utility, test/temp). One malformed process does
     not abort the run. Honours dry-run mode in config (parses and reports, writes nothing).
@@ -467,7 +518,7 @@ def extract(config_path: str, quiet: bool) -> None:
         with TM1Client(cfg) as client:
             if client.dry_run:
                 click.echo("Dry-run: parsing all processes, nothing will be written.")
-            click.echo("Extracting cube lineage for all processes...")
+            click.echo("Extracting lineage for all processes...")
             summary = extract_all(client, progress=_progress)
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -589,54 +640,6 @@ def diagnose_unresolved(
     click.echo('     (use --expression "" to find the blank-target references)')
 
 
-@main.command(name="extract-chain")
-@click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def extract_chain(name: str, config_path: str) -> None:
-    """Parse a TI's chain dependencies and write them into }Meta_Process_Chain."""
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    try:
-        with TM1Client(cfg) as client:
-            reader = TIReader(client)
-            if not reader.exists(name):
-                raise click.ClickException(f"Process not found: {name}")
-            ti = reader.read(name)
-
-            lines = code_lines(ti)
-            const_table = build_const_table(lines)
-            refs = extract_references(lines, const_table=const_table)
-            result = rollup_chain_lineage(ti.name, refs)
-
-            click.echo(f"Process: {ti.name}")
-            click.echo(f"Chain dependencies: {len(result.rows)}")
-            for row in result.rows:
-                click.echo(
-                    f"  triggers {row.callee:<50} "
-                    f"count={row.count}  first={row.first_block}:{row.first_line}"
-                )
-            if result.unresolved_count:
-                click.echo(f"  ({result.unresolved_count} chain calls stayed dynamic, not written)")
-
-            if client.dry_run:
-                click.echo("Dry-run: nothing written.")
-                return
-
-            written = write_chain_lineage(client, list(result.rows))
-            click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
-    except TM1ClientError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-
 @main.command(name="export-graph")
 @click.option(
     "--config",
@@ -665,21 +668,16 @@ def extract_chain(name: str, config_path: str) -> None:
     help="Path to a local vis-network.min.js to inline for a fully offline file.",
 )
 def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) -> None:
-    """Export an interactive HTML data-flow map (processes, cubes, reads/writes/triggers)."""
+    """Export an interactive HTML data-flow map (processes, cubes, datasources, chores)."""
     try:
         cfg = load_config(Path(config_path))
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    def _refs_for(reader: TIReader, name: str) -> list:
-        ti = reader.read(name)
-        lines = code_lines(ti)
-        const_table = build_const_table(lines)
-        return extract_references(lines, const_table=const_table)
-
     cube_rows: list = []
     chain_rows: list = []
-    ds_rows = []
+    ds_rows: list = []
+    chore_rows: list = []
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
@@ -690,16 +688,20 @@ def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) 
                     ti = reader.read(name)
                     lines = code_lines(ti)
                     const_table = build_const_table(lines)
-
                     refs = extract_references(lines, const_table=const_table)
                     cube_rows.extend(rollup_cube_lineage(name, refs).rows)
                     chain_rows.extend(rollup_chain_lineage(name, refs).rows)
                     d = datasource_row(name, getattr(ti, "datasource", None))
                     if d is not None:
                         ds_rows.append(d)
-
                 except Exception as exc:  # noqa: BLE001 - isolate per-process failures
                     click.echo(f"  (skip {name}: {type(exc).__name__})")
+
+            # Chores are instance-level: read once, INSIDE the with-block (client open).
+            try:
+                chore_rows = ChoreReader(client).read_all()
+            except Exception as exc:  # noqa: BLE001 - isolate chore-read failures
+                click.echo(f"  (skip chores: {type(exc).__name__})")
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -707,7 +709,7 @@ def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) 
     if vis_js_path:
         vis_js = Path(vis_js_path).read_text(encoding="utf-8")
 
-    graph = build_graph(cube_rows, chain_rows, ds_rows)
+    graph = build_graph(cube_rows, chain_rows, ds_rows, chore_rows)
     html_text = render_html(graph, title=title, vis_js=vis_js)
     Path(out_path).write_text(html_text, encoding="utf-8")
 
@@ -716,8 +718,9 @@ def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) 
         f"{len(graph.cube_ids())} cubes, {graph.edge_count} relationships."
     )
     if not vis_js:
-        click.echo("Open it in a browser. (First load fetches vis-network from a CDN; ")
-        click.echo(" pass --vis-js path\\to\\vis-network.min.js to make it fully offline.)")
+        click.echo("Open it in a browser. (First load fetches vis-network from a CDN;")
+        click.echo(" download vis-network.min.js and pass --vis-js <path> for a fully")
+        click.echo(" offline file.)")
 
 
 if __name__ == "__main__":

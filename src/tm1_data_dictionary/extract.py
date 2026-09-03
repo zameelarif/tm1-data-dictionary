@@ -1,11 +1,11 @@
 """Orchestrate lineage extraction across every process in an instance.
 
 This composes the already-tested pieces - :class:`TIReader`, block segmentation, const
-propagation, reference extraction, and the cube/chain/datasource rollups + writers - into a
-single pass over *all* processes. It is the "whole model in one command" step behind
-``tm1dd extract``, and it populates ``}Meta_Process_Cube`` (cube lineage),
-``}Meta_Process_Chain`` (process dependencies), and ``}Meta_Process_Datasource`` (where data
-enters) from one parse of each process.
+propagation, reference extraction, the cube/chain/datasource rollups + writers, and the
+chore reader/writer - into a single pass. It is the "whole model in one command" step
+behind ``tm1dd extract``, and it populates ``}Meta_Process_Cube`` (cube lineage),
+``}Meta_Process_Chain`` (process dependencies), ``}Meta_Process_Datasource`` (where data
+enters), and ``}Meta_Chore_Process`` (what runs on a schedule).
 
 Design points that matter at hundreds of real processes:
 
@@ -15,8 +15,9 @@ Design points that matter at hundreds of real processes:
   is parsed inside a ``try/except``, failures counted and reported, the loop continues.
 - **Parse once, roll up many.** Each process is parsed a single time; its references and
   datasource feed the cube, chain, and datasource rollups.
-- **Full clear-and-reload.** All target cubes are cleared once at the start (Phase 1), then
-  all rows are written in one batch each.
+- **Chores read once.** Chores are instance-level metadata, so they are read once after the
+  per-process loop (not per process).
+- **Full clear-and-reload.** All target cubes are cleared once before writing (Phase 1).
 - **Dry-run aware.** In dry-run the whole pipeline runs and reports counts, but nothing is
   cleared or written.
 """
@@ -26,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from tm1_data_dictionary.chore_reader import ChoreReader
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.chain_rollup import ChainRow, rollup_chain_lineage
@@ -38,6 +40,10 @@ from tm1_data_dictionary.tm1_client import TM1Client
 from tm1_data_dictionary.writers.process_chain_writer import (
     clear_process_chain,
     write_chain_lineage,
+)
+from tm1_data_dictionary.writers.process_chore_writer import (
+    clear_chore_process,
+    write_chore_lineage,
 )
 from tm1_data_dictionary.writers.process_cube_writer import (
     clear_process_cube,
@@ -64,6 +70,7 @@ class ExtractionSummary:
     cube_rows_written: int = 0
     chain_rows_written: int = 0
     datasource_rows_written: int = 0
+    chore_rows_written: int = 0
     unresolved_cube_refs: int = 0
     unresolved_chain_refs: int = 0
     excluded_names: list[str] = field(default_factory=list)
@@ -80,6 +87,7 @@ class ExtractionSummary:
             f"Cube-lineage rows: {self.cube_rows_written}{written}",
             f"Chain-lineage rows: {self.chain_rows_written}{written}",
             f"Datasource rows: {self.datasource_rows_written}{written}",
+            f"Chore rows: {self.chore_rows_written}{written}",
         ]
         if self.unresolved_cube_refs:
             lines.append(f"Unresolved cube references: {self.unresolved_cube_refs}")
@@ -118,7 +126,7 @@ def extract_all(
     rules: ExclusionRules | None = None,
     progress: ProgressFn | None = None,
 ) -> ExtractionSummary:
-    """Extract cube, chain, and datasource lineage for every non-excluded process."""
+    """Extract cube, chain, datasource, and chore lineage for the whole instance."""
     rules = rules or ExclusionRules.default()
     reader = TIReader(client)
     summary = ExtractionSummary(dry_run=client.dry_run)
@@ -136,6 +144,7 @@ def extract_all(
         clear_process_cube(client)
         clear_process_chain(client)
         clear_process_datasource(client)
+        clear_chore_process(client)
 
     all_cube_rows: list[CubeLineageRow] = []
     all_chain_rows: list[ChainRow] = []
@@ -159,14 +168,23 @@ def extract_all(
         if progress is not None:
             progress(i, total, name, status)
 
+    # Chores are instance-level metadata: read once (isolated so a failure doesn't abort).
+    try:
+        chore_rows = ChoreReader(client).read_all()
+    except Exception as exc:  # noqa: BLE001 - isolate chore-read failures
+        chore_rows = []
+        summary.failed_names.append(("<chores>", f"{type(exc).__name__}: {exc}"))
+
     # Write everything in one batch each (unless dry-run).
     if client.dry_run:
         summary.cube_rows_written = len(all_cube_rows)
         summary.chain_rows_written = len(all_chain_rows)
         summary.datasource_rows_written = len(all_ds_rows)
+        summary.chore_rows_written = len(chore_rows)
     else:
         summary.cube_rows_written = write_cube_lineage(client, all_cube_rows)
         summary.chain_rows_written = write_chain_lineage(client, all_chain_rows)
         summary.datasource_rows_written = write_datasource_lineage(client, all_ds_rows)
+        summary.chore_rows_written = write_chore_lineage(client, chore_rows)
 
     return summary
