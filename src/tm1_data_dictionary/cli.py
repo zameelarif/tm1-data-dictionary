@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -500,10 +501,10 @@ def extract_chain(name: str, config_path: str) -> None:
     help="Suppress per-process progress lines (show only the summary).",
 )
 def extract(config_path: str, quiet: bool) -> None:
-    """Extract cube, chain, datasource, and chore lineage for EVERY process in the instance.
+    """Extract cube, chain, datasource, and chore lineage for EVERY process.
 
-    Applies exclusion rules (Bedrock/utility, test/temp). One malformed process does
-    not abort the run. Honours dry-run mode in config (parses and reports, writes nothing).
+    Applies exclusion rules. One malformed process does not abort the run. Records the
+    run (who/when/status) into }Meta_Extraction_Audit. Honours dry-run mode.
     """
     try:
         cfg = load_config(Path(config_path))
@@ -514,12 +515,31 @@ def extract(config_path: str, quiet: bool) -> None:
         if not quiet:
             click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
 
+    start = datetime.now(UTC)
+    run_by = f"{getpass.getuser()} via {cfg.connection.user}"
+
     try:
         with TM1Client(cfg) as client:
             if client.dry_run:
                 click.echo("Dry-run: parsing all processes, nothing will be written.")
             click.echo("Extracting lineage for all processes...")
             summary = extract_all(client, progress=_progress)
+
+            # Record this run in the audit cube (inside the with-block; client open).
+            if not client.dry_run:
+                status = "Success" if summary.failed == 0 else "CompletedWithFailures"
+                warnings = f"{summary.failed} process(es) failed" if summary.failed else ""
+                try:
+                    AuditWriter(client).record_run(
+                        extractor_version=__version__,
+                        schema_version=SCHEMA_VERSION,
+                        start_time=start,
+                        exit_status=status,
+                        run_by=run_by,
+                        warnings=warnings,
+                    )
+                except Exception as exc:  # noqa: BLE001 - audit failure must not fail extract
+                    click.echo(f"  (audit record not written: {type(exc).__name__})")
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -527,6 +547,8 @@ def extract(config_path: str, quiet: bool) -> None:
     click.echo("Extraction complete.")
     for line in summary.as_lines():
         click.echo(f"  {line}")
+    if not summary.dry_run:
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
 
 
 @main.command(name="diagnose-unresolved")

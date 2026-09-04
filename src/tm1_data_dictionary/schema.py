@@ -136,6 +136,7 @@ AUDIT_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("EndTime", STRING),
     ElementDef("DurationSeconds", NUMERIC),
     ElementDef("ExitStatus", STRING),
+    ElementDef("RunBy", STRING),  # <-- ADD THIS LINE
     ElementDef("Warnings", STRING),
 )
 
