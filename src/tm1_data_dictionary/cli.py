@@ -36,6 +36,7 @@ from tm1_data_dictionary.schema import (
     process_chain_schema,
     process_cube_schema,
     process_datasource_schema,
+    process_dimension_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
@@ -121,10 +122,11 @@ def bootstrap(config_path: str) -> None:
             r3 = ensure_schema(client, process_chain_schema())
             r4 = ensure_schema(client, process_datasource_schema())
             r5 = ensure_schema(client, chore_process_schema())
+            r6 = ensure_schema(client, process_dimension_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5)
+    results = (r1, r2, r3, r4, r5, r6)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
@@ -134,6 +136,10 @@ def bootstrap(config_path: str) -> None:
             click.echo(f"  created cube       {name}")
         for name in result.cubes_skipped:
             click.echo(f"  exists  cube       {name}")
+        for name in result.dimensions_created:
+            click.echo(f"  created dimension  {name}")
+        for name in result.dimensions_skipped:
+            click.echo(f"  exists  dimension  {name}")
 
     if any(r.created_anything for r in results):
         click.echo("Bootstrap complete: schema created.")
@@ -517,18 +523,21 @@ def extract(config_path: str, quiet: bool) -> None:
 
     start = datetime.now(UTC)
     run_by = f"{getpass.getuser()} via {cfg.connection.user}"
+    audit_recorded = False
 
     try:
         with TM1Client(cfg) as client:
             if client.dry_run:
                 click.echo("Dry-run: parsing all processes, nothing will be written.")
+
             click.echo("Extracting lineage for all processes...")
             summary = extract_all(client, progress=_progress)
 
-            # Record this run in the audit cube (inside the with-block; client open).
             if not client.dry_run:
                 status = "Success" if summary.failed == 0 else "CompletedWithFailures"
+
                 warnings = f"{summary.failed} process(es) failed" if summary.failed else ""
+
                 try:
                     AuditWriter(client).record_run(
                         extractor_version=__version__,
@@ -538,17 +547,23 @@ def extract(config_path: str, quiet: bool) -> None:
                         run_by=run_by,
                         warnings=warnings,
                     )
-                except Exception as exc:  # noqa: BLE001 - audit failure must not fail extract
-                    click.echo(f"  (audit record not written: {type(exc).__name__})")
+                    audit_recorded = True
+                except Exception as exc:  # noqa: BLE001
+                    click.echo(f"  Audit record not written: {exc}")
+
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo("")
     click.echo("Extraction complete.")
+
     for line in summary.as_lines():
         click.echo(f"  {line}")
-    if not summary.dry_run:
-        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
+
+    if audit_recorded:
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit " f"(RunBy: {run_by})")
+    elif not summary.dry_run:
+        click.echo("  Extraction succeeded, but the audit record was not written.")
 
 
 @main.command(name="diagnose-unresolved")

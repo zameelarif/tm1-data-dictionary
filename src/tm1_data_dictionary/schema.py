@@ -86,6 +86,24 @@ DIM_DATASOURCE = "}Meta_Datasource"
 DIM_DATASOURCE_MEASURE = "}Meta_DatasourceMeasure"
 CUBE_PROCESS_DATASOURCE = "}Meta_Process_Datasource"
 
+DIM_DIMENSION = "}Meta_Dimension"
+DIM_DIM_ROLE = "}Meta_DimRole"
+DIM_PROCESS_DIM_MEASURE = "}Meta_ProcessDimMeasure"
+CUBE_PROCESS_DIMENSION = "}Meta_Process_Dimension"
+
+# The roles the dimension-lineage writer records.
+DIM_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("DimUpdate", STRING),  # inserts/maintains elements
+    ElementDef("AttrWrite", STRING),  # writes element attributes
+)
+
+# Measures for }Meta_Process_Dimension.
+PROCESS_DIM_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),
+    ElementDef("FirstBlock", STRING),
+    ElementDef("FirstLine", NUMERIC),
+)
+
 # Measures for }Meta_Process_Datasource.
 DATASOURCE_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("SourceType", STRING),  # File | ODBC | View | Other
@@ -228,5 +246,26 @@ def chore_process_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(chore_dim, process_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_dimension_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Dimension and its key dimensions.
+
+    Dimensioned }Meta_Process x }Meta_Dimension x }Meta_DimRole x }Meta_ProcessDimMeasure.
+    }Meta_Dimension holds dimension names (added by the writer); }Meta_DimRole is seeded
+    with DimUpdate/AttrWrite.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    dimension_dim = DimensionDef(DIM_DIMENSION, (SEED_ELEMENT,))
+    role_dim = DimensionDef(DIM_DIM_ROLE, DIM_ROLE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_PROCESS_DIM_MEASURE, PROCESS_DIM_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_DIMENSION,
+        (DIM_PROCESS, DIM_DIMENSION, DIM_DIM_ROLE, DIM_PROCESS_DIM_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, dimension_dim, role_dim, measure_dim),
         cubes=(cube,),
     )
