@@ -10,6 +10,7 @@ The pipeline populates:
 - ``}Meta_Process_Datasource`` for process datasources
 - ``}Meta_Chore_Process`` for scheduled process execution
 - ``}Meta_Process_Dimension`` for dimension and attribute maintenance
+- ``}Meta_Unresolved_Reference`` for cube targets that stayed dynamic
 
 Design principles:
 
@@ -37,6 +38,10 @@ from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.datasource_rollup import (
     DatasourceRow,
     datasource_row,
+)
+from tm1_data_dictionary.parser.diagnostics import (
+    UnresolvedOccurrence,
+    collect_unresolved,
 )
 from tm1_data_dictionary.parser.dim_rollup import (
     DimLineageRow,
@@ -69,6 +74,10 @@ from tm1_data_dictionary.writers.process_dimension_writer import (
     clear_process_dimension,
     write_dimension_lineage,
 )
+from tm1_data_dictionary.writers.unresolved_writer import (
+    clear_unresolved_references,
+    write_unresolved_references,
+)
 
 # A progress callback receives:
 # current index, total count, process name, and process status.
@@ -90,6 +99,7 @@ class ExtractionSummary:
     datasource_rows_written: int = 0
     chore_rows_written: int = 0
     dimension_rows_written: int = 0
+    unresolved_rows_written: int = 0
 
     unresolved_cube_refs: int = 0
     unresolved_chain_refs: int = 0
@@ -116,6 +126,7 @@ class ExtractionSummary:
             (f"Datasource rows: " f"{self.datasource_rows_written}{written_suffix}"),
             (f"Chore rows: " f"{self.chore_rows_written}{written_suffix}"),
             (f"Dimension rows: " f"{self.dimension_rows_written}{written_suffix}"),
+            (f"Unresolved-reference rows: " f"{self.unresolved_rows_written}{written_suffix}"),
             (f"Unresolved cube references: " f"{self.unresolved_cube_refs}"),
             (f"Unresolved chain references: " f"{self.unresolved_chain_refs}"),
             (f"Unresolved dimension references: " f"{self.unresolved_dim_refs}"),
@@ -139,6 +150,7 @@ def _extract_one(
     list[DimLineageRow],
     int,
     DatasourceRow | None,
+    list[UnresolvedOccurrence],
 ]:
     """Parse one process and return all supported lineage results.
 
@@ -151,6 +163,7 @@ def _extract_one(
     5. Dimension-lineage rows
     6. Unresolved dimension-reference count
     7. Datasource row, when the process has a datasource
+    8. Unresolved cube-reference occurrences (for }Meta_Unresolved_Reference)
     """
 
     ti = reader.read(name)
@@ -182,6 +195,11 @@ def _extract_one(
         getattr(ti, "datasource", None),
     )
 
+    unresolved_occurrences = collect_unresolved(
+        ti.name,
+        refs,
+    )
+
     return (
         list(cube_result.rows),
         cube_result.unresolved_count,
@@ -190,6 +208,7 @@ def _extract_one(
         list(dimension_result.rows),
         dimension_result.unresolved_count,
         process_datasource_row,
+        unresolved_occurrences,
     )
 
 
@@ -227,11 +246,13 @@ def extract_all(
         clear_process_datasource(client)
         clear_chore_process(client)
         clear_process_dimension(client)
+        clear_unresolved_references(client)
 
     all_cube_rows: list[CubeLineageRow] = []
     all_chain_rows: list[ChainRow] = []
     all_datasource_rows: list[DatasourceRow] = []
     all_dimension_rows: list[DimLineageRow] = []
+    all_unresolved: list[UnresolvedOccurrence] = []
 
     total_included = len(partition_result.included)
 
@@ -248,6 +269,7 @@ def extract_all(
                 dimension_rows,
                 unresolved_dimension_count,
                 process_datasource_row,
+                unresolved_occurrences,
             ) = _extract_one(
                 reader,
                 process_name,
@@ -256,6 +278,7 @@ def extract_all(
             all_cube_rows.extend(cube_rows)
             all_chain_rows.extend(chain_rows)
             all_dimension_rows.extend(dimension_rows)
+            all_unresolved.extend(unresolved_occurrences)
 
             if process_datasource_row is not None:
                 all_datasource_rows.append(process_datasource_row)
@@ -307,6 +330,10 @@ def extract_all(
         summary.datasource_rows_written = len(all_datasource_rows)
         summary.chore_rows_written = len(chore_rows)
         summary.dimension_rows_written = len(all_dimension_rows)
+        summary.unresolved_rows_written = write_unresolved_references(
+            client,
+            all_unresolved,
+        )
 
         return summary
 
@@ -333,6 +360,11 @@ def extract_all(
     summary.dimension_rows_written = write_dimension_lineage(
         client,
         all_dimension_rows,
+    )
+
+    summary.unresolved_rows_written = write_unresolved_references(
+        client,
+        all_unresolved,
     )
 
     return summary

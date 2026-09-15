@@ -37,6 +37,7 @@ from tm1_data_dictionary.schema import (
     process_cube_schema,
     process_datasource_schema,
     process_dimension_schema,
+    unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
@@ -158,10 +159,11 @@ def bootstrap(config_path: str, environment: str | None) -> None:
             r4 = ensure_schema(client, process_datasource_schema())
             r5 = ensure_schema(client, chore_process_schema())
             r6 = ensure_schema(client, process_dimension_schema())
+            r7 = ensure_schema(client, unresolved_reference_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5, r6)
+    results = (r1, r2, r3, r4, r5, r6, r7)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")

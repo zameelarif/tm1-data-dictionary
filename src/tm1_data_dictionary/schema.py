@@ -65,31 +65,56 @@ class SchemaDef:
 
 
 # --------------------------------------------------------------------------- #
-# The }Meta_Extraction_Audit schema (the first, simplest cube)
+# Dimension / cube names
 # --------------------------------------------------------------------------- #
+# Defined once, reused, so a typo can't drift between definition and use.
 
-# Dimension names (defined once, reused, so a typo can't drift between definition and use).
+# --- }Meta_Extraction_Audit (the first, simplest cube) ---
 DIM_EXTRACTION_RUN = "}Meta_ExtractionRun"
 DIM_AUDIT_MEASURE = "}Meta_AuditMeasure"
 CUBE_EXTRACTION_AUDIT = "}Meta_Extraction_Audit"
+
+# --- }Meta_Process_Cube ---
 DIM_PROCESS = "}Meta_Process"
 DIM_CUBE = "}Meta_Cube"
 DIM_ROLE = "}Meta_Role"
 DIM_PROCESS_CUBE_MEASURE = "}Meta_ProcessCubeMeasure"
 CUBE_PROCESS_CUBE = "}Meta_Process_Cube"
 
+# --- }Meta_Process_Chain ---
 DIM_PROCESS_CALLEE = "}Meta_Process_Callee"
 DIM_PROCESS_CHAIN_MEASURE = "}Meta_ProcessChainMeasure"
 CUBE_PROCESS_CHAIN = "}Meta_Process_Chain"
 
+# --- }Meta_Process_Datasource ---
 DIM_DATASOURCE = "}Meta_Datasource"
 DIM_DATASOURCE_MEASURE = "}Meta_DatasourceMeasure"
 CUBE_PROCESS_DATASOURCE = "}Meta_Process_Datasource"
 
+# --- }Meta_Process_Dimension ---
 DIM_DIMENSION = "}Meta_Dimension"
 DIM_DIM_ROLE = "}Meta_DimRole"
 DIM_PROCESS_DIM_MEASURE = "}Meta_ProcessDimMeasure"
 CUBE_PROCESS_DIMENSION = "}Meta_Process_Dimension"
+
+# --- }Meta_Chore_Process ---
+DIM_CHORE = "}Meta_Chore"
+DIM_CHORE_PROCESS_MEASURE = "}Meta_ChoreProcessMeasure"
+CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
+
+# --- }Meta_Unresolved_Reference ---
+DIM_UNRESOLVED_EXPRESSION = "}Meta_UnresolvedExpression"
+DIM_UNRESOLVED_MEASURE = "}Meta_UnresolvedMeasure"
+CUBE_UNRESOLVED_REFERENCE = "}Meta_Unresolved_Reference"
+
+
+# --------------------------------------------------------------------------- #
+# Seed element + role / measure element sets
+# --------------------------------------------------------------------------- #
+
+# A harmless seed element so a dimension (and therefore its cube) can be created
+# before any data has been recorded. Real elements are added by the writers.
+SEED_ELEMENT = ElementDef("_Init", NUMERIC)
 
 # The roles the dimension-lineage writer records.
 DIM_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
@@ -97,38 +122,7 @@ DIM_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
     ElementDef("AttrWrite", STRING),  # writes element attributes
 )
 
-# Measures for }Meta_Process_Dimension.
-PROCESS_DIM_MEASURES: tuple[ElementDef, ...] = (
-    ElementDef("Count", NUMERIC),
-    ElementDef("FirstBlock", STRING),
-    ElementDef("FirstLine", NUMERIC),
-)
-
-# Measures for }Meta_Process_Datasource.
-DATASOURCE_MEASURES: tuple[ElementDef, ...] = (
-    ElementDef("SourceType", STRING),  # File | ODBC | View | Other
-    ElementDef("Detail", STRING),  # query (ODBC) or owning cube (view)
-)
-
-# Measures for }Meta_Process_Chain.
-PROCESS_CHAIN_MEASURES: tuple[ElementDef, ...] = (
-    ElementDef("Count", NUMERIC),
-    ElementDef("FirstBlock", STRING),
-    ElementDef("FirstLine", NUMERIC),
-)
-
-DIM_CHORE = "}Meta_Chore"
-DIM_CHORE_PROCESS_MEASURE = "}Meta_ChoreProcessMeasure"
-CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
-
-# Measures for }Meta_Chore_Process.
-CHORE_PROCESS_MEASURES: tuple[ElementDef, ...] = (
-    ElementDef("StepOrder", NUMERIC),  # 0-based execution order within the chore
-    ElementDef("Active", STRING),  # Yes | No
-    ElementDef("Frequency", STRING),  # e.g. P1DT0H0M0S
-)
-
-# The roles the cube-lineage writer can record (seed elements for }Meta_Role).
+# The roles the cube-lineage writer records.
 CUBE_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
     ElementDef("CubeRead", STRING),
     ElementDef("CubeWrite", STRING),
@@ -141,9 +135,40 @@ PROCESS_CUBE_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("FirstLine", NUMERIC),
 )
 
-# A harmless seed element so the run dimension (and therefore the cube) can be created
-# before any run has been recorded. Real run timestamps are added by the audit writer.
-SEED_ELEMENT = ElementDef("_Init", NUMERIC)
+# Measures for }Meta_Process_Chain.
+PROCESS_CHAIN_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),
+    ElementDef("FirstBlock", STRING),
+    ElementDef("FirstLine", NUMERIC),
+)
+
+# Measures for }Meta_Process_Datasource.
+DATASOURCE_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("SourceType", STRING),  # File | ODBC | View | Other
+    ElementDef("Detail", STRING),  # query (ODBC) or owning cube (view)
+)
+
+# Measures for }Meta_Process_Dimension.
+PROCESS_DIM_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),
+    ElementDef("FirstBlock", STRING),
+    ElementDef("FirstLine", NUMERIC),
+)
+
+# Measures for }Meta_Chore_Process.
+CHORE_PROCESS_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("StepOrder", NUMERIC),  # 0-based execution order within the chore
+    ElementDef("Active", STRING),  # Yes | No
+    ElementDef("Frequency", STRING),  # e.g. P1DT0H0M0S
+)
+
+# Measures for }Meta_Unresolved_Reference.
+UNRESOLVED_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # how many occurrences of this expression
+    ElementDef("Role", STRING),  # CubeRead | CubeWrite (first occurrence)
+    ElementDef("FirstBlock", STRING),  # block of the first occurrence
+    ElementDef("FirstLine", NUMERIC),  # line of the first occurrence
+)
 
 # The measures captured for each extractor run. String where the value is text, Numeric
 # where it is a count or duration.
@@ -154,11 +179,14 @@ AUDIT_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("EndTime", STRING),
     ElementDef("DurationSeconds", NUMERIC),
     ElementDef("ExitStatus", STRING),
-    ElementDef("RunBy", STRING),  # <-- ADD THIS LINE
+    ElementDef("RunBy", STRING),
     ElementDef("Warnings", STRING),
 )
 
 
+# --------------------------------------------------------------------------- #
+# Schema builders
+# --------------------------------------------------------------------------- #
 def audit_schema() -> SchemaDef:
     """Return the schema for the ``}Meta_Extraction_Audit`` cube and its two dimensions."""
     run_dim = DimensionDef(DIM_EXTRACTION_RUN, (SEED_ELEMENT,))
@@ -267,5 +295,30 @@ def process_dimension_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(process_dim, dimension_dim, role_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def unresolved_reference_schema() -> SchemaDef:
+    """Return the schema for }Meta_Unresolved_Reference and its key dimensions.
+
+    Dimensioned }Meta_Process x }Meta_UnresolvedExpression x }Meta_UnresolvedMeasure.
+    It records the cube reads/writes whose target stayed dynamic (const-propagation could
+    not resolve the variable/expression to a concrete cube name), grouped per
+    (process, raw target expression). This turns the opaque "unresolved" count into a
+    queryable, per-process manual-review work queue.
+
+    }Meta_Process and }Meta_UnresolvedExpression start with the seed element; the writer
+    adds real process names and expressions as they are discovered.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    expression_dim = DimensionDef(DIM_UNRESOLVED_EXPRESSION, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_UNRESOLVED_MEASURE, UNRESOLVED_MEASURES)
+    cube = CubeDef(
+        CUBE_UNRESOLVED_REFERENCE,
+        (DIM_PROCESS, DIM_UNRESOLVED_EXPRESSION, DIM_UNRESOLVED_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, expression_dim, measure_dim),
         cubes=(cube,),
     )
