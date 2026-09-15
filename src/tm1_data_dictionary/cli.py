@@ -504,6 +504,20 @@ def extract(config_path: str, environment: str | None, quiet: bool) -> None:
                         exit_status=status,
                         run_by=run_by,
                         warnings=warnings,
+                        metrics={
+                            "processes_total": summary.total_processes,
+                            "processes_included": summary.included,
+                            "processes_excluded": summary.excluded,
+                            "processes_failed": summary.failed,
+                            "cube_rows": summary.cube_rows_written,
+                            "chain_rows": summary.chain_rows_written,
+                            "datasource_rows": summary.datasource_rows_written,
+                            "chore_rows": summary.chore_rows_written,
+                            "dimension_rows": summary.dimension_rows_written,
+                            "unresolved_cube_refs": summary.unresolved_cube_refs,
+                            "unresolved_chain_refs": summary.unresolved_chain_refs,
+                            "unresolved_dim_refs": summary.unresolved_dim_refs,
+                        },
                     )
                     audit_recorded = True
                 except Exception as exc:  # noqa: BLE001

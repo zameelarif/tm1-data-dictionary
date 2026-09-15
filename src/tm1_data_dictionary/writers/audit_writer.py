@@ -50,6 +50,19 @@ AUDIT_MEASURE_TYPES: dict[str, str] = {
     "ExitStatus": STRING,
     "RunBy": STRING,
     "Warnings": STRING,
+    # --- run metrics (added; auto-created by the self-healing writer) ---
+    "ProcessesTotal": NUMERIC,
+    "ProcessesIncluded": NUMERIC,
+    "ProcessesExcluded": NUMERIC,
+    "ProcessesFailed": NUMERIC,
+    "CubeRows": NUMERIC,
+    "ChainRows": NUMERIC,
+    "DatasourceRows": NUMERIC,
+    "ChoreRows": NUMERIC,
+    "DimensionRows": NUMERIC,
+    "UnresolvedCubeRefs": NUMERIC,
+    "UnresolvedChainRefs": NUMERIC,
+    "UnresolvedDimRefs": NUMERIC,
 }
 
 
@@ -93,6 +106,18 @@ class AuditRecord:
     exit_status: str
     run_by: str = ""
     warnings: str = ""
+    processes_total: int = 0
+    processes_included: int = 0
+    processes_excluded: int = 0
+    processes_failed: int = 0
+    cube_rows: int = 0
+    chain_rows: int = 0
+    datasource_rows: int = 0
+    chore_rows: int = 0
+    dimension_rows: int = 0
+    unresolved_cube_refs: int = 0
+    unresolved_chain_refs: int = 0
+    unresolved_dim_refs: int = 0
 
     def as_cells(self) -> dict[str, object]:
         """Return audit measure names and their cell values."""
@@ -106,6 +131,18 @@ class AuditRecord:
             "ExitStatus": self.exit_status,
             "RunBy": self.run_by,
             "Warnings": self.warnings,
+            "ProcessesTotal": self.processes_total,
+            "ProcessesIncluded": self.processes_included,
+            "ProcessesExcluded": self.processes_excluded,
+            "ProcessesFailed": self.processes_failed,
+            "CubeRows": self.cube_rows,
+            "ChainRows": self.chain_rows,
+            "DatasourceRows": self.datasource_rows,
+            "ChoreRows": self.chore_rows,
+            "DimensionRows": self.dimension_rows,
+            "UnresolvedCubeRefs": self.unresolved_cube_refs,
+            "UnresolvedChainRefs": self.unresolved_chain_refs,
+            "UnresolvedDimRefs": self.unresolved_dim_refs,
         }
 
 
@@ -250,17 +287,16 @@ class AuditWriter:
         exit_status: str = "Success",
         run_by: str = "",
         warnings: str = "",
+        metrics: dict[str, int] | None = None,
     ) -> AuditRecord:
         """Create, write, and return a completed extraction audit record."""
 
         start_dt = _as_utc(start_time)
         end_dt = _as_utc(self.clock())
 
-        duration_seconds = max(
-            0.0,
-            (end_dt - start_dt).total_seconds(),
-        )
+        duration_seconds = max(0.0, (end_dt - start_dt).total_seconds())
 
+        m = metrics or {}
         record = AuditRecord(
             run_id=self.new_run_id(end_dt),
             extractor_version=str(extractor_version),
@@ -271,8 +307,19 @@ class AuditWriter:
             exit_status=str(exit_status),
             run_by=str(run_by),
             warnings=str(warnings),
+            processes_total=int(m.get("processes_total", 0)),
+            processes_included=int(m.get("processes_included", 0)),
+            processes_excluded=int(m.get("processes_excluded", 0)),
+            processes_failed=int(m.get("processes_failed", 0)),
+            cube_rows=int(m.get("cube_rows", 0)),
+            chain_rows=int(m.get("chain_rows", 0)),
+            datasource_rows=int(m.get("datasource_rows", 0)),
+            chore_rows=int(m.get("chore_rows", 0)),
+            dimension_rows=int(m.get("dimension_rows", 0)),
+            unresolved_cube_refs=int(m.get("unresolved_cube_refs", 0)),
+            unresolved_chain_refs=int(m.get("unresolved_chain_refs", 0)),
+            unresolved_dim_refs=int(m.get("unresolved_dim_refs", 0)),
         )
 
         self.write(record)
-
         return record

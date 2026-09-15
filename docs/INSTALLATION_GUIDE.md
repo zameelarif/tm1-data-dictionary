@@ -1,207 +1,275 @@
-# TM1 Data Dictionary — Installation Guide
+# Installation Guide — TM1 Data Dictionary (`tm1dd`)
 
-This guide gets the TM1 Data Dictionary (`tm1dd`) installed and connected to a TM1 /
-Planning Analytics instance, from a clean machine.
+This guide takes you from a clean machine to a working `tm1dd` install that can
+build a data dictionary against a TM1 / Planning Analytics model.
 
----
-
-## 1. Prerequisites
-
-| Requirement | Version / notes |
-|---|---|
-| **Operating system** | Windows Server 2016+ / Windows 10+, or Linux (RHEL 7+, Ubuntu 18.04+) |
-| **Python** | 3.10 or later (developed and tested on 3.13). 64-bit. |
-| **TM1 / Planning Analytics** | On-premises v11.x (PAL 2.0.x). The REST API (HTTP/HTTPS) must be enabled. |
-| **Network access to TM1** | The machine running `tm1dd` needs REST reachability to the TM1 server's HTTP(S) port. Off-server is fine and preferred. |
-| **A TM1 user** | An account that can read processes/cubes/dimensions and create `}Meta_*` control objects. Admin or a suitably-privileged service account. |
-| **Git** | Optional but recommended (for cloning/updating the repo). |
-| **pip** | Comes with Python. |
-
-**No internet is required at runtime** for the core tool. (The optional data-flow HTML map
-fetches a graph library from a CDN on first open unless you inline it — see the User Guide.)
-
-### Find your TM1 REST port
-You need the **HTTP port** (the REST API port), not the classic client port. Check the
-instance's `tm1s.cfg`:
-- `HTTPPortNumber=NNNN`  ← this is the one `tm1dd` connects to
-- `UseSSL=T` or `F`      ← tells you whether to use `ssl: true/false`
+It assumes you are on **Windows** with **PowerShell**, since that is the primary
+development environment for this project. The steps are otherwise
+platform-neutral.
 
 ---
 
-## 2. Get the code
+## 1. Overview
 
-Either clone the repository:
+`tm1dd` is a Python command-line tool. Installing it means:
+
+1. Getting the code.
+2. Creating an isolated Python environment.
+3. Installing dependencies.
+4. Telling it how to connect to your TM1 server(s).
+5. Storing your TM1 password securely.
+6. Creating the `}Meta_*` schema in the model.
+7. Running your first extraction.
+
+---
+
+## 2. Prerequisites
+
+| Requirement | Version / Notes |
+|-------------|-----------------|
+| Python | 3.13 (64-bit) |
+| Git | Any recent version |
+| VS Code | Recommended editor |
+| TM1 / Planning Analytics | REST API (HTTP/HTTPS) reachable from your machine |
+| A TM1 user | With rights to read TI processes/chores and create `}Meta_*` cubes |
+
+Verify Python and Git:
 
 ```powershell
-git clone https://github.com/<your-org>/tm1-data-dictionary.git
+python --version
+git --version
+```
+
+---
+
+## 3. Get the code
+
+```powershell
+cd C:\TM1_Models
+git clone <your-repo-url> tm1-data-dictionary
 cd tm1-data-dictionary
 ```
 
-…or copy the project folder onto the machine and `cd` into it.
-
 ---
 
-## 3. Create a virtual environment
+## 4. Create and activate a virtual environment
 
-A virtual environment keeps the tool's dependencies isolated from system Python.
-
-**Windows (PowerShell):**
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
-**Linux / macOS (bash):**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
+Your prompt should now start with `(.venv)`.
 
-You should see `(.venv)` at the start of your prompt. Confirm the right Python:
-```powershell
-where.exe python      # Windows - should point inside .venv\Scripts
-python --version      # should be 3.10+
-```
-
-> **PowerShell execution policy:** if activation is blocked, run once in that window:
-> `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`
+> If activation is blocked, run PowerShell as your user and set:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
 ---
 
-## 4. Install the tool
-
-From the project root, with the venv active:
+## 5. Install dependencies
 
 ```powershell
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-This installs `tm1dd`, TM1py, and (with `[dev]`) the developer toolchain. It should end with
-`Successfully installed tm1-data-dictionary-...`. If you only want to *run* the tool (not
-develop it), `pip install -e .` is enough.
+The `-e` (editable) install means code changes take effect immediately. The
+`[dev]` extra installs the tooling (`pre-commit`, `black`, `ruff`, `mypy`,
+`pytest`).
 
-Confirm the CLI is registered:
+Install the git hooks:
+
 ```powershell
-tm1dd --version
-tm1dd --help
+pre-commit install
 ```
 
 ---
 
-## 5. Configure the connection
+## 6. Configure your environment(s)
 
-Create your config from the templates:
+Configuration lives in **`config.yaml`** (structure) and **`.env`** (values and
+secrets). The YAML never contains secrets directly — it names the environment
+variables that hold each value.
 
-```powershell
-copy config.yaml.example config.yaml
-copy .env.example .env
-```
+### 6.1 `config.yaml`
 
-Edit **`config.yaml`** — the connection section names environment variables that hold the
-actual values:
+`config.yaml` supports **multiple named environments** in one file:
 
 ```yaml
-connection:
-  address_env: TM1_ADDRESS
-  port_env: TM1_PORT
-  ssl_env: TM1_SSL
-  auth_mode: basic          # basic | cam | sso
-  user_env: TM1_USER
-  password_env: TM1_METADICT_PWD
-  namespace_env: TM1_NAMESPACE
+default_environment: dev
 
-run:
-  dry_run: false            # true = parse & report, write nothing
+environments:
+  dev:
+    connection:
+      address_env: TM1_DEV_ADDRESS
+      port_env: TM1_DEV_PORT
+      ssl_env: TM1_DEV_SSL
+      auth_mode: basic
+      user_env: TM1_DEV_USER
+      password_env: TM1_DEV_PWD
+      namespace_env: TM1_DEV_NAMESPACE
+    run:
+      dry_run: false
+      max_requests_per_second: 20
+    logs:
+      enabled: true
+      server_log_path_env: TM1_DEV_LOG_PATH
+      copy_logs_locally: true
 
-logs:
-  enabled: true
-  server_log_path_env: TM1_LOG_PATH
+  demo:
+    connection:
+      address_env: TM1_DEMO_ADDRESS
+      port_env: TM1_DEMO_PORT
+      ssl_env: TM1_DEMO_SSL
+      auth_mode: basic
+      user_env: TM1_DEMO_USER
+      password_env: TM1_DEMO_PWD
+      namespace_env: TM1_DEMO_NAMESPACE
+    run:
+      dry_run: true
+      max_requests_per_second: 20
+    logs:
+      enabled: true
+      server_log_path_env: TM1_DEMO_LOG_PATH
+      copy_logs_locally: true
 ```
 
-Edit **`.env`** — the real values (this file is gitignored, so secrets stay local):
+- `default_environment` is used when you don't pass `--env`.
+- Each environment names its **own** set of environment variables, so secrets
+  never mix between servers.
 
+> **Legacy single-block files still work.** If `config.yaml` has a top-level
+> `connection:` block and no `environments:` section, it loads exactly as
+> before, and `--env` is not accepted.
+
+### 6.2 `.env`
+
+Create a `.env` file next to `config.yaml` (it is git-ignored) with the values:
+
+```dotenv
+# --- dev ---
+TM1_DEV_ADDRESS=localhost
+TM1_DEV_PORT=8001
+TM1_DEV_SSL=false
+TM1_DEV_USER=admin
+TM1_DEV_NAMESPACE=
+
+# --- demo (fill in when ready) ---
+TM1_DEMO_ADDRESS=demo-host
+TM1_DEMO_PORT=8010
+TM1_DEMO_SSL=true
+TM1_DEMO_USER=svc_tm1dd
+TM1_DEMO_NAMESPACE=
 ```
-TM1_ADDRESS=localhost
-TM1_PORT=8010
-TM1_SSL=true
-TM1_USER=admin
-TM1_NAMESPACE=
-TM1_LOG_PATH=C:/path/to/tm1server.log
-# TM1_METADICT_PWD - see the next step (prefer the keyring over putting it here)
-```
+
+Do **not** put passwords in `.env` — use the keyring (next step).
 
 ---
 
-## 6. Store the TM1 password securely (recommended)
+## 7. Store your password securely
 
-Rather than leave the password in `.env` as plaintext, store it in the OS keyring
-(Windows Credential Manager / macOS Keychain / Linux Secret Service):
+Passwords are stored in the OS keyring (Windows Credential Manager), keyed by
+the `password_env` name for each environment:
 
 ```powershell
-tm1dd set-credential
+tm1dd set-credential --name TM1_DEV_PWD
+tm1dd set-credential --name TM1_DEMO_PWD
 ```
 
-You'll be prompted (hidden input, entered twice). It's stored encrypted, tied to your OS
-user. Then **delete the `TM1_METADICT_PWD` line from `.env`** — the tool will read it from
-the keyring automatically.
-
-> On unattended servers where a keyring isn't available, you can instead set
-> `TM1_METADICT_PWD` as an environment variable (e.g. via the scheduler) — the tool falls
-> back to that automatically.
+You are prompted for the value; it is never echoed or written to a file.
 
 ---
 
-## 7. Verify the environment
-
-Run the built-in diagnostic (make sure the TM1 instance is running first):
+## 8. Verify your environment
 
 ```powershell
-python scripts\check_environment.py
+tm1dd check
 ```
 
-You want **all five checks PASS**:
-- Python version
-- Config files (config.yaml + .env loaded)
-- TM1 connection (connects and reports the server name/version)
-- TM1 permissions (reads processes/cubes; a scratch write test succeeds)
-- Log file access
-
-If **TM1 connection** fails, it's almost always the port or SSL flag — re-check
-`HTTPPortNumber` / `UseSSL` in `tm1s.cfg` and match `TM1_PORT` / `TM1_SSL`.
+This runs the environment diagnostic. Resolve anything it flags before
+continuing.
 
 ---
 
-## 8. First run
+## 9. Bootstrap the schema
 
-Create the dictionary schema, then populate it:
+Create the `}Meta_*` dimensions and cubes in the target model. This is
+idempotent — existing objects are left untouched.
 
 ```powershell
-tm1dd bootstrap      # creates the }Meta_* dimensions and cubes (idempotent)
-tm1dd extract        # parses all business processes; writes cube + chain lineage
+tm1dd bootstrap --env dev
 ```
 
-You're installed and running. See the **User Guide** for what each command does and how to
-read the results.
+You should see `created` / `exists` lines for each dimension and cube.
 
 ---
 
-## 9. Updating
+## 10. Run your first extraction
 
 ```powershell
-git pull                      # get the latest code
-.venv\Scripts\Activate.ps1    # ensure the venv is active
-pip install -e ".[dev]"       # reinstall in case dependencies changed
+tm1dd extract --env dev
+```
+
+A successful run ends with a summary like:
+
+```
+Extraction complete.
+  Processes: 492 total, 117 included, 375 excluded
+  Parsed OK: 117, failed: 0
+  Cube-lineage rows: 73 written
+  Chain-lineage rows: 105 written
+  Datasource rows: 74 written
+  Chore rows: 13 written
+  Dimension rows: 58 written
+  Run recorded in }Meta_Extraction_Audit (RunBy: <you> via <tm1_user>)
 ```
 
 ---
 
-## Troubleshooting quick reference
+## 11. (Optional) Export the data-flow map
 
-| Symptom | Likely cause / fix |
-|---|---|
-| `tm1dd: command not found` | venv not active, or `pip install -e .` not run. Activate and reinstall. |
-| TM1 connection FAIL | Wrong `TM1_PORT` / `TM1_SSL`. Match `tm1s.cfg` `HTTPPortNumber` / `UseSSL`. |
-| `... can not be found in collection of type 'Cube'` | Run `tm1dd bootstrap` before `tm1dd extract`. |
-| Password prompt every run / not found | Store it with `tm1dd set-credential`, or set `TM1_METADICT_PWD` in the environment. |
-| PowerShell blocks `Activate.ps1` | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` in that window. |
-| Control objects (`}Meta_*`) not visible in PA | Enable "Display Control Objects" in Architect / PAW / Arc. |
+```powershell
+tm1dd export-graph --env dev --out data_flow.html
+```
+
+For a fully offline file, download `vis-network.min.js` and pass it:
+
+```powershell
+tm1dd export-graph --env dev --out data_flow.html --vis-js .\vis-network.min.js
+```
+
+---
+
+## 12. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Environment variable 'TM1_..._ADDRESS' is not set` | `.env` missing the per-env names | Add the variables for that environment to `.env` |
+| `--env 'x' ... has no 'environments' section` | Legacy single-block `config.yaml` | Add an `environments:` block, or omit `--env` |
+| `... can not be found in collection of type 'Cube'` | Schema not created on this server | Run `tm1dd bootstrap --env <name>` |
+| `Audit record not written: ...` | Audit measures missing on an older model | The writer self-heals; if it persists, re-run `bootstrap` |
+| Connection refused / timeout | Wrong host/port/SSL | Check the `.env` values and that the TM1 REST port is reachable |
+| Pre-commit reformats files then fails | `black`/`ruff` auto-fixed | `git add -A` and re-run `pre-commit run --all-files` |
+
+---
+
+## 13. Running against a new (e.g. demo) server
+
+1. Add a new environment block to `config.yaml`.
+2. Add its variables to `.env`.
+3. `tm1dd set-credential --name TM1_<ENV>_PWD`
+4. `tm1dd bootstrap --env <name>`
+5. `tm1dd extract --env <name>`
+
+Consider setting `dry_run: true` for a new environment first, to parse and
+report counts without writing anything.
+
+---
+
+## 14. Security notes
+
+- Secrets live only in the OS keyring, never in `config.yaml` or `.env`.
+- `config.yaml` names variables; `.env` holds non-secret values and is
+  git-ignored.
+- Use a dedicated, least-privilege TM1 service account where possible.
+- Nothing about credentials is written to the audit cube.
