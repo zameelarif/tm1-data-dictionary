@@ -1,22 +1,22 @@
 """Configuration loading and validation for the TM1 Data Dictionary.
 
 This module is the single source of truth for runtime configuration. It loads
-``config.yaml`` (structure) together with environment variables / ``.env`` (values,
-including secrets via a :class:`CredentialProvider`), validates that everything the
-extractor needs is present, and returns typed dataclasses that every downstream
-module can rely on.
+``config.yaml`` (structure) together with environment variables / ``.env``
+(values, including secrets via a :class:`CredentialProvider`), validates that
+everything the extractor needs is present, and returns typed dataclasses that
+every downstream module can rely on.
 
 Design principles:
-
 - **Fail fast, fail clearly.** Missing or malformed configuration raises a
-  :class:`ConfigError` with an actionable message at load time, rather than a cryptic
-  crash deep in the pipeline.
-- **Secrets via an abstraction.** The password is never read directly; it comes from a
-  :class:`CredentialProvider`, so the storage backend (env, keyring, vault) can change
-  later without touching this module's consumers.
-- **Env-var indirection (Option A).** ``config.yaml`` names the environment variables
-  that hold each value (e.g. ``address_env: TM1_ADDRESS``); the actual values live in
-  ``.env`` / the environment. This keeps all secrets consolidated outside the YAML.
+  :class:`ConfigError` with an actionable message at load time.
+- **Secrets via an abstraction.** The password comes from a
+  :class:`CredentialProvider`, so the storage backend can change later.
+- **Env-var indirection (Option A).** ``config.yaml`` names the environment
+  variables that hold each value; the actual values live in ``.env`` / the
+  environment.
+- **Multiple environments (one file).** ``config.yaml`` may define an
+  ``environments`` mapping plus a ``default_environment``. A single-block
+  legacy file (top-level ``connection``/``run``/``logs``) is still supported.
 """
 
 from __future__ import annotations
@@ -76,12 +76,12 @@ class AppConfig:
     connection: ConnectionConfig
     run: RunConfig
     logs: LogConfig
+    environment: str | None = None
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -104,7 +104,7 @@ def _as_bool(value: object, *, field: str) -> bool:
 def _as_int(value: object, *, field: str) -> int:
     """Coerce a YAML/env value to int, raising ConfigError on failure."""
     if isinstance(value, bool):
-        # bool is a subclass of int; reject it explicitly to avoid True -> 1 surprises.
+        # bool is a subclass of int; reject it explicitly.
         raise ConfigError(f"Config value for '{field}' must be an integer, got: {value!r}")
     if isinstance(value, int | str):
         try:
@@ -138,8 +138,6 @@ def _env_optional(name: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # Section builders
 # --------------------------------------------------------------------------- #
-
-
 def _build_connection(raw: dict, provider: CredentialProvider) -> ConnectionConfig:
     if not isinstance(raw, dict):
         raise ConfigError("The 'connection' section is missing or malformed in config.yaml.")
@@ -205,13 +203,63 @@ def _build_logs(raw: dict | None) -> LogConfig:
 
 
 # --------------------------------------------------------------------------- #
+# Environment selection
+# --------------------------------------------------------------------------- #
+def _select_environment(
+    raw: dict,
+    environment: str | None,
+) -> tuple[dict, str | None]:
+    """Return the (config_block, environment_name) to build from.
+
+    Supports two layouts:
+
+    1. Multi-environment: an ``environments`` mapping plus an optional
+       ``default_environment``. The chosen block is returned.
+    2. Legacy single-block: no ``environments`` key; the raw mapping itself
+       is returned and the environment name is ``None``.
+    """
+    environments = raw.get("environments")
+
+    if environments is None:
+        # Legacy single-block file. An explicit --env is not valid here.
+        if environment is not None:
+            raise ConfigError(
+                f"--env '{environment}' was requested, but config.yaml has no "
+                f"'environments' section. Add one, or omit --env."
+            )
+        return raw, None
+
+    if not isinstance(environments, dict) or not environments:
+        raise ConfigError("'environments' in config.yaml must be a non-empty mapping.")
+
+    chosen = environment or raw.get("default_environment")
+    if chosen is None:
+        available = ", ".join(sorted(environments))
+        raise ConfigError(
+            "No environment selected and no 'default_environment' is set. "
+            f"Pass --env, or set default_environment. Available: {available}"
+        )
+
+    block = environments.get(chosen)
+    if block is None:
+        available = ", ".join(sorted(environments))
+        raise ConfigError(
+            f"Environment '{chosen}' not found in config.yaml. " f"Available: {available}"
+        )
+
+    if not isinstance(block, dict):
+        raise ConfigError(f"Environment '{chosen}' must be a mapping in config.yaml.")
+
+    return block, chosen
+
+
+# --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
-
-
 def load_config(
     config_path: str | Path,
     *,
+    environment: str | None = None,
     env_path: str | Path | None = None,
     provider: CredentialProvider | None = None,
 ) -> AppConfig:
@@ -219,18 +267,21 @@ def load_config(
 
     Args:
         config_path: path to ``config.yaml``.
-        env_path: path to a ``.env`` file to load into the environment. If ``None``,
-            a ``.env`` next to ``config.yaml`` is used when present.
-        provider: credential provider for secrets. Defaults to the env-var provider.
+        environment: named environment to load from an ``environments`` block.
+            If ``None``, ``default_environment`` is used (multi-env files) or
+            the single top-level block is used (legacy files).
+        env_path: path to a ``.env`` file to load. If ``None``, a ``.env`` next
+            to ``config.yaml`` is used when present.
+        provider: credential provider for secrets. Defaults to env-var provider.
 
     Raises:
-        ConfigError: if the file is missing, malformed, or any required value is absent.
+        ConfigError: if the file is missing, malformed, or any required value
+            is absent, or the requested environment does not exist.
     """
     config_path = Path(config_path)
     if not config_path.exists():
         raise ConfigError(f"config.yaml not found at: {config_path}")
 
-    # Load .env into the environment before reading any env-backed values.
     if env_path is not None:
         load_dotenv(env_path)
     else:
@@ -244,10 +295,16 @@ def load_config(
     if not isinstance(raw, dict):
         raise ConfigError("config.yaml must contain a top-level mapping.")
 
+    block, env_name = _select_environment(raw, environment)
+
     provider = provider or default_provider()
+    connection = _build_connection(block.get("connection", {}), provider)
+    run = _build_run(block.get("run"))
+    logs = _build_logs(block.get("logs"))
 
-    connection = _build_connection(raw.get("connection", {}), provider)
-    run = _build_run(raw.get("run"))
-    logs = _build_logs(raw.get("logs"))
-
-    return AppConfig(connection=connection, run=run, logs=logs)
+    return AppConfig(
+        connection=connection,
+        run=run,
+        logs=logs,
+        environment=env_name,
+    )

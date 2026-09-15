@@ -46,6 +46,48 @@ from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 SCHEMA_VERSION = "1.1"
 
 
+# --------------------------------------------------------------------------- #
+# Shared options
+# --------------------------------------------------------------------------- #
+def _config_option(func):
+    """Attach the --config option to a command."""
+    return click.option(
+        "--config",
+        "config_path",
+        default="config.yaml",
+        show_default=True,
+        help="Path to config.yaml.",
+    )(func)
+
+
+def _env_option(func):
+    """Attach the --env option to a command.
+
+    Selects a named environment from an ``environments`` block in config.yaml.
+    If omitted, ``default_environment`` is used (or the legacy single block).
+    """
+    return click.option(
+        "--env",
+        "environment",
+        default=None,
+        help="Named environment from config.yaml (e.g. dev, demo).",
+    )(func)
+
+
+def _load(config_path: str, environment: str | None):
+    """Load config for the selected environment, raising a Click error nicely."""
+    try:
+        return load_config(Path(config_path), environment=environment)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _echo_env(cfg) -> None:
+    """Print which environment was used, when one is named."""
+    if cfg.environment:
+        click.echo(f"Environment: {cfg.environment}")
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="tm1dd")
 def main() -> None:
@@ -98,22 +140,15 @@ def set_credential(name: str) -> None:
 
 
 @main.command()
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def bootstrap(config_path: str) -> None:
+@_config_option
+@_env_option
+def bootstrap(config_path: str, environment: str | None) -> None:
     """Create the }Meta_* schema (dimensions and cubes) in the target TM1 instance.
 
     Idempotent: objects that already exist are left untouched. Honours dry-run mode.
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
 
     try:
         with TM1Client(cfg) as client:
@@ -136,10 +171,6 @@ def bootstrap(config_path: str) -> None:
             click.echo(f"  created cube       {name}")
         for name in result.cubes_skipped:
             click.echo(f"  exists  cube       {name}")
-        for name in result.dimensions_created:
-            click.echo(f"  created dimension  {name}")
-        for name in result.dimensions_skipped:
-            click.echo(f"  exists  dimension  {name}")
 
     if any(r.created_anything for r in results):
         click.echo("Bootstrap complete: schema created.")
@@ -148,29 +179,22 @@ def bootstrap(config_path: str) -> None:
 
 
 @main.command(name="record-run")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--status",
     default="Success",
     show_default=True,
     help="Exit status to record for this run.",
 )
-def record_run(config_path: str, status: str) -> None:
+def record_run(config_path: str, environment: str | None, status: str) -> None:
     """Write one run record into }Meta_Extraction_Audit.
 
     Useful for proving the write path end-to-end: it records a row with the current
     extractor version, start/end time, and status. Honours dry-run mode in config.
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
 
     start = datetime.now(UTC)
     try:
@@ -191,22 +215,14 @@ def record_run(config_path: str, status: str) -> None:
 
 
 @main.command(name="list-processes")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--contains", default="", help="Only show names containing this text (case-insensitive)."
 )
-def list_processes(config_path: str, contains: str) -> None:
+def list_processes(config_path: str, environment: str | None, contains: str) -> None:
     """List TI process names in the instance (optionally filtered)."""
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     needle = contains.lower()
     try:
@@ -223,19 +239,11 @@ def list_processes(config_path: str, contains: str) -> None:
 
 @main.command(name="inspect-process")
 @click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def inspect_process(name: str, config_path: str) -> None:
+@_config_option
+@_env_option
+def inspect_process(name: str, config_path: str, environment: str | None) -> None:
     """Print a summary of a single TI process (blocks, datasource, variables, parameters)."""
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     try:
         with TM1Client(cfg) as client:
@@ -254,16 +262,13 @@ def inspect_process(name: str, config_path: str) -> None:
         click.echo(f"  source: {ds.name_for_server}")
     if ds.type in {"ASCII", "CHARACTERDELIMITED"}:
         click.echo(f"  delimiter: {ds.delimiter!r}  header rows: {ds.header_records}")
-
     click.echo(f"  variables ({ti.variable_count}):")
     for v in ti.variables:
         click.echo(f"    {v.position:>2}  {v.name}  ({v.var_type})")
-
     if ti.parameters:
         click.echo(f"  parameters ({ti.parameter_count}):")
         for p in ti.parameters:
             click.echo(f"    {p.name}  ({p.param_type})  default={p.default_value!r}")
-
     click.echo("  block line counts:")
     for block_name, text in ti.iter_blocks():
         lines = len(text.splitlines()) if text else 0
@@ -272,23 +277,15 @@ def inspect_process(name: str, config_path: str) -> None:
 
 @main.command(name="extract-refs")
 @click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def extract_refs(name: str, config_path: str) -> None:
+@_config_option
+@_env_option
+def extract_refs(name: str, config_path: str, environment: str | None) -> None:
     """Extract and print the function references (lineage) from a single TI process.
 
     Uses const-propagation so variable targets (e.g. cCube) are resolved to their
     literal values (e.g. WeeklySales) where it is safe to do so.
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     try:
         with TM1Client(cfg) as client:
@@ -317,8 +314,8 @@ def extract_refs(name: str, config_path: str) -> None:
         else:
             target = f"({r.target})"  # still dynamic
         click.echo(f"  {r.block:<9} {r.line_no:>4}  {r.role.value:<10} {r.function:<20} {target}")
-
     click.echo("")
+
     counts: dict[str, int] = {}
     for r in refs:
         counts[r.role.value] = counts.get(r.role.value, 0) + 1
@@ -328,30 +325,22 @@ def extract_refs(name: str, config_path: str) -> None:
 
 @main.command(name="show-vars")
 @click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--all-assignments",
     is_flag=True,
     default=False,
     help="Show every assignment (not just one summary line per variable).",
 )
-def show_vars(name: str, config_path: str, all_assignments: bool) -> None:
+def show_vars(name: str, config_path: str, environment: str | None, all_assignments: bool) -> None:
     """Show the variable dictionary for a TI: every variable and where its value comes from.
 
     Complements 'extract-refs': where const-propagation cannot safely resolve a variable
     (e.g. cCube set from a cube read), this shows the raw assignment(s) so a developer can
     trace it by hand.
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     try:
         with TM1Client(cfg) as client:
@@ -363,7 +352,6 @@ def show_vars(name: str, config_path: str, all_assignments: bool) -> None:
         raise click.ClickException(str(exc)) from exc
 
     variables = summarize_variables(code_lines(ti))
-
     click.echo(f"Process: {ti.name}")
     click.echo(f"Variables assigned in code: {len(variables)}")
     click.echo("")
@@ -391,22 +379,14 @@ def show_vars(name: str, config_path: str, all_assignments: bool) -> None:
 
 @main.command(name="extract-cube")
 @click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def extract_cube(name: str, config_path: str) -> None:
+@_config_option
+@_env_option
+def extract_cube(name: str, config_path: str, environment: str | None) -> None:
     """Parse a TI's cube lineage and write it into }Meta_Process_Cube.
 
     Honours dry-run mode in config (parses and reports, but writes nothing).
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     try:
         with TM1Client(cfg) as client:
@@ -414,7 +394,6 @@ def extract_cube(name: str, config_path: str) -> None:
             if not reader.exists(name):
                 raise click.ClickException(f"Process not found: {name}")
             ti = reader.read(name)
-
             lines = code_lines(ti)
             const_table = build_const_table(lines)
             refs = extract_references(lines, const_table=const_table)
@@ -437,7 +416,6 @@ def extract_cube(name: str, config_path: str) -> None:
             if client.dry_run:
                 click.echo("Dry-run: nothing written.")
                 return
-
             written = write_cube_lineage(client, list(result.rows))
             click.echo(f"Wrote {written} rows into }}Meta_Process_Cube.")
     except TM1ClientError as exc:
@@ -446,19 +424,11 @@ def extract_cube(name: str, config_path: str) -> None:
 
 @main.command(name="extract-chain")
 @click.argument("name")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
-def extract_chain(name: str, config_path: str) -> None:
+@_config_option
+@_env_option
+def extract_chain(name: str, config_path: str, environment: str | None) -> None:
     """Parse a TI's chain dependencies and write them into }Meta_Process_Chain."""
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     try:
         with TM1Client(cfg) as client:
@@ -466,7 +436,6 @@ def extract_chain(name: str, config_path: str) -> None:
             if not reader.exists(name):
                 raise click.ClickException(f"Process not found: {name}")
             ti = reader.read(name)
-
             lines = code_lines(ti)
             const_table = build_const_table(lines)
             refs = extract_references(lines, const_table=const_table)
@@ -485,7 +454,6 @@ def extract_chain(name: str, config_path: str) -> None:
             if client.dry_run:
                 click.echo("Dry-run: nothing written.")
                 return
-
             written = write_chain_lineage(client, list(result.rows))
             click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
     except TM1ClientError as exc:
@@ -493,29 +461,22 @@ def extract_chain(name: str, config_path: str) -> None:
 
 
 @main.command(name="extract")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--quiet",
     is_flag=True,
     default=False,
     help="Suppress per-process progress lines (show only the summary).",
 )
-def extract(config_path: str, quiet: bool) -> None:
+def extract(config_path: str, environment: str | None, quiet: bool) -> None:
     """Extract cube, chain, datasource, and chore lineage for EVERY process.
 
     Applies exclusion rules. One malformed process does not abort the run. Records the
     run (who/when/status) into }Meta_Extraction_Audit. Honours dry-run mode.
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
 
     def _progress(i: int, total: int, name: str, status: str) -> None:
         if not quiet:
@@ -529,15 +490,12 @@ def extract(config_path: str, quiet: bool) -> None:
         with TM1Client(cfg) as client:
             if client.dry_run:
                 click.echo("Dry-run: parsing all processes, nothing will be written.")
-
             click.echo("Extracting lineage for all processes...")
             summary = extract_all(client, progress=_progress)
 
             if not client.dry_run:
                 status = "Success" if summary.failed == 0 else "CompletedWithFailures"
-
                 warnings = f"{summary.failed} process(es) failed" if summary.failed else ""
-
                 try:
                     AuditWriter(client).record_run(
                         extractor_version=__version__,
@@ -550,30 +508,23 @@ def extract(config_path: str, quiet: bool) -> None:
                     audit_recorded = True
                 except Exception as exc:  # noqa: BLE001
                     click.echo(f"  Audit record not written: {exc}")
-
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo("")
     click.echo("Extraction complete.")
-
     for line in summary.as_lines():
         click.echo(f"  {line}")
 
     if audit_recorded:
-        click.echo(f"  Run recorded in }}Meta_Extraction_Audit " f"(RunBy: {run_by})")
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
     elif not summary.dry_run:
         click.echo("  Extraction succeeded, but the audit record was not written.")
 
 
 @main.command(name="diagnose-unresolved")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--top",
     default=25,
@@ -593,7 +544,11 @@ def extract(config_path: str, quiet: bool) -> None:
     help='Locate every occurrence of one exact target expression (use "" for the blank target).',
 )
 def diagnose_unresolved(
-    config_path: str, top: int, process_name: str, expression: str | None
+    config_path: str,
+    environment: str | None,
+    top: int,
+    process_name: str,
+    expression: str | None,
 ) -> None:
     """Report which cube-target expressions stay unresolved (read-only, no writes).
 
@@ -603,10 +558,7 @@ def diagnose_unresolved(
       * --expression EXPR  - every process/line where EXPR is the unresolved target
                              (pass --expression "" to find blank-target parse edge cases).
     """
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     def _refs_for(reader: TIReader, name: str) -> list:
         ti = reader.read(name)
@@ -678,13 +630,8 @@ def diagnose_unresolved(
 
 
 @main.command(name="export-graph")
-@click.option(
-    "--config",
-    "config_path",
-    default="config.yaml",
-    show_default=True,
-    help="Path to config.yaml.",
-)
+@_config_option
+@_env_option
 @click.option(
     "--out",
     "out_path",
@@ -704,12 +651,15 @@ def diagnose_unresolved(
     default="",
     help="Path to a local vis-network.min.js to inline for a fully offline file.",
 )
-def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) -> None:
+def export_graph(
+    config_path: str,
+    environment: str | None,
+    out_path: str,
+    title: str,
+    vis_js_path: str,
+) -> None:
     """Export an interactive HTML data-flow map (processes, cubes, datasources, chores)."""
-    try:
-        cfg = load_config(Path(config_path))
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    cfg = _load(config_path, environment)
 
     cube_rows: list = []
     chain_rows: list = []
@@ -749,7 +699,6 @@ def export_graph(config_path: str, out_path: str, title: str, vis_js_path: str) 
     graph = build_graph(cube_rows, chain_rows, ds_rows, chore_rows)
     html_text = render_html(graph, title=title, vis_js=vis_js)
     Path(out_path).write_text(html_text, encoding="utf-8")
-
     click.echo(
         f"Wrote {out_path}: {len(graph.process_ids())} processes, "
         f"{len(graph.cube_ids())} cubes, {graph.edge_count} relationships."
