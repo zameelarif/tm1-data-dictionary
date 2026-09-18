@@ -1,0 +1,32 @@
+# tm1dd — function watch list
+#
+# One function name per line. Blank lines and #-comments are ignored.
+# Matching is case-insensitive.
+#
+# Every call to a listed function is captured into }Meta_Process_Function,
+# one row per call site, with the arguments as written in the TI.
+#
+# Edit this file freely — no rebuild or reinstall is needed. A missing file
+# simply means no function usage is captured.
+
+# --- File / external output ---
+ASCIIOutput
+TextOutput
+ODBCOutput
+ExecuteCommand
+ExecuteProcess
+
+# --- Performance / logging ---
+CubeSetLogChanges
+SaveDataAll
+CubeProcessFeeders
+
+# --- Data management ---
+ViewZeroOut
+
+
+# --- Record handling ---
+
+
+# --- Security ---
+SecurityRefresh

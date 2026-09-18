@@ -37,6 +37,7 @@ from tm1_data_dictionary.schema import (
     process_cube_schema,
     process_datasource_schema,
     process_dimension_schema,
+    process_function_schema,
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
@@ -160,10 +161,11 @@ def bootstrap(config_path: str, environment: str | None) -> None:
             r5 = ensure_schema(client, chore_process_schema())
             r6 = ensure_schema(client, process_dimension_schema())
             r7 = ensure_schema(client, unresolved_reference_schema())
+            r8 = ensure_schema(client, process_function_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5, r6, r7)
+    results = (r1, r2, r3, r4, r5, r6, r7, r8)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
@@ -466,13 +468,25 @@ def extract_chain(name: str, config_path: str, environment: str | None) -> None:
 @_config_option
 @_env_option
 @click.option(
+    "--functions",
+    "functions_file",
+    default=None,
+    help="Function watch list (default: functions.txt beside config.yaml).",
+)
+@click.option(
     "--quiet",
     is_flag=True,
     default=False,
     help="Suppress per-process progress lines (show only the summary).",
 )
-def extract(config_path: str, environment: str | None, quiet: bool) -> None:
-    """Extract cube, chain, datasource, and chore lineage for EVERY process.
+def extract(
+    config_path: str,
+    environment: str | None,
+    functions_file: str | None,
+    quiet: bool,
+) -> None:
+    """Extract cube, chain, datasource, chore, dimension, and function usage for
+    EVERY process.
 
     Applies exclusion rules. One malformed process does not abort the run. Records the
     run (who/when/status) into }Meta_Extraction_Audit. Honours dry-run mode.
@@ -488,12 +502,19 @@ def extract(config_path: str, environment: str | None, quiet: bool) -> None:
     run_by = f"{getpass.getuser()} via {cfg.connection.user}"
     audit_recorded = False
 
+    # Default the watch list to functions.txt beside config.yaml.
+    watchlist = functions_file or (Path(config_path).parent / "functions.txt")
+
     try:
         with TM1Client(cfg) as client:
             if client.dry_run:
                 click.echo("Dry-run: parsing all processes, nothing will be written.")
             click.echo("Extracting lineage for all processes...")
-            summary = extract_all(client, progress=_progress)
+            summary = extract_all(
+                client,
+                progress=_progress,
+                functions_file=watchlist,
+            )
 
             if not client.dry_run:
                 status = "Success" if summary.failed == 0 else "CompletedWithFailures"
@@ -516,6 +537,7 @@ def extract(config_path: str, environment: str | None, quiet: bool) -> None:
                             "datasource_rows": summary.datasource_rows_written,
                             "chore_rows": summary.chore_rows_written,
                             "dimension_rows": summary.dimension_rows_written,
+                            "function_rows": summary.function_rows_written,
                             "unresolved_cube_refs": summary.unresolved_cube_refs,
                             "unresolved_chain_refs": summary.unresolved_chain_refs,
                             "unresolved_dim_refs": summary.unresolved_dim_refs,

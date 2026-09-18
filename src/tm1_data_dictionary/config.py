@@ -1,19 +1,20 @@
 """Configuration loading and validation for the TM1 Data Dictionary.
 
 This module is the single source of truth for runtime configuration. It loads
-``config.yaml`` (structure) together with environment variables / ``.env``
-(values, including secrets via a :class:`CredentialProvider`), validates that
-everything the extractor needs is present, and returns typed dataclasses that
-every downstream module can rely on.
+``config.yaml``, validates that everything the extractor needs is present, and
+returns typed dataclasses that every downstream module can rely on.
 
 Design principles:
 - **Fail fast, fail clearly.** Missing or malformed configuration raises a
   :class:`ConfigError` with an actionable message at load time.
-- **Secrets via an abstraction.** The password comes from a
-  :class:`CredentialProvider`, so the storage backend can change later.
-- **Env-var indirection (Option A).** ``config.yaml`` names the environment
-  variables that hold each value; the actual values live in ``.env`` / the
-  environment.
+- **Secrets stay out of the file.** The password always comes from a
+  :class:`CredentialProvider` (OS keyring), never from ``config.yaml``.
+- **Values may be literal or indirect.** Each connection field can be given
+  either directly (``address: wdtmone21``) or as the *name* of an environment
+  variable holding the value (``address_env: TM1_DEV_ADDRESS``). Literal values
+  win when both are present. This keeps a single self-contained file practical
+  when one server hosts many TM1 instances, while preserving env-var
+  indirection for anyone who wants it.
 - **Multiple environments (one file).** ``config.yaml`` may define an
   ``environments`` mapping plus a ``default_environment``. A single-block
   legacy file (top-level ``connection``/``run``/``logs``) is still supported.
@@ -116,23 +117,57 @@ def _as_int(value: object, *, field: str) -> int:
     raise ConfigError(f"Config value for '{field}' must be an integer, got: {value!r}")
 
 
-def _env(name: str, *, field: str) -> str:
-    """Read a required environment variable, raising ConfigError if unset."""
-    value = os.getenv(name)
-    if value is None or value == "":
-        raise ConfigError(
-            f"Environment variable '{name}' (needed for '{field}') is not set. "
-            f"Add it to your .env file or environment."
-        )
-    return value
+def _resolve(
+    raw: dict,
+    key: str,
+    *,
+    field: str,
+    required: bool = True,
+    default_env_name: str | None = None,
+) -> str | None:
+    """Return a connection value given either literally or via an env-var name.
 
+    Resolution order:
 
-def _env_optional(name: str) -> str | None:
-    """Read an optional environment variable; empty/unset becomes None."""
-    value = os.getenv(name)
-    if value is None or value == "":
+    1. ``<key>`` in the YAML block - used directly as the value.
+    2. ``<key>_env`` in the YAML block - the *name* of an environment variable
+       to read the value from.
+    3. ``default_env_name`` - a conventional fallback variable name.
+
+    Args:
+        raw: the ``connection`` (or other) mapping from config.yaml.
+        key: the base field name, e.g. ``"address"``.
+        field: dotted name used in error messages, e.g. ``"connection.address"``.
+        required: when True, a missing/empty result raises ConfigError.
+        default_env_name: fallback environment-variable name.
+
+    Raises:
+        ConfigError: when the value is required but cannot be resolved.
+    """
+    # 1. Literal value in config.yaml.
+    literal = raw.get(key)
+    if literal is not None and str(literal).strip() != "":
+        return str(literal).strip()
+
+    # 2/3. Environment-variable indirection.
+    env_name = raw.get(f"{key}_env") or default_env_name
+    if env_name:
+        env_name = str(env_name).strip()
+        if env_name:
+            value = os.getenv(env_name)
+            if value is not None and value != "":
+                return value
+
+    if not required:
         return None
-    return value
+
+    hint = f" (or set '{key}_env' to an environment variable name)" if env_name is None else ""
+    if env_name:
+        raise ConfigError(
+            f"Could not resolve '{field}'. Set '{key}' directly in config.yaml, "
+            f"or set the environment variable '{env_name}'."
+        )
+    raise ConfigError(f"Could not resolve '{field}'. Set '{key}' in config.yaml{hint}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -142,30 +177,45 @@ def _build_connection(raw: dict, provider: CredentialProvider) -> ConnectionConf
     if not isinstance(raw, dict):
         raise ConfigError("The 'connection' section is missing or malformed in config.yaml.")
 
-    address = _env(raw.get("address_env", "TM1_ADDRESS"), field="connection.address")
-    port = _as_int(
-        _env(raw.get("port_env", "TM1_PORT"), field="connection.port"),
-        field="connection.port",
+    address = _resolve(raw, "address", field="connection.address", default_env_name="TM1_ADDRESS")
+    port_value = _resolve(raw, "port", field="connection.port", default_env_name="TM1_PORT")
+    ssl_value = _resolve(raw, "ssl", field="connection.ssl", default_env_name="TM1_SSL")
+    user = _resolve(raw, "user", field="connection.user", default_env_name="TM1_USER")
+    namespace = _resolve(
+        raw,
+        "namespace",
+        field="connection.namespace",
+        required=False,
+        default_env_name="TM1_NAMESPACE",
     )
-    ssl = _as_bool(
-        _env(raw.get("ssl_env", "TM1_SSL"), field="connection.ssl"),
-        field="connection.ssl",
-    )
-    user = _env(raw.get("user_env", "TM1_USER"), field="connection.user")
-    namespace = _env_optional(raw.get("namespace_env", "TM1_NAMESPACE"))
+
+    port = _as_int(port_value, field="connection.port")
+    ssl = _as_bool(ssl_value, field="connection.ssl")
 
     auth_mode = str(raw.get("auth_mode", "basic")).strip().lower()
     if auth_mode not in {"basic", "cam", "sso"}:
         raise ConfigError(f"connection.auth_mode must be one of basic|cam|sso, got: {auth_mode!r}")
 
-    password_env = raw.get("password_env", "TM1_METADICT_PWD")
-    try:
-        password = provider.require_secret(password_env)
-    except CredentialError as exc:
-        raise ConfigError(str(exc)) from exc
-
     if not 1 <= port <= 65535:
         raise ConfigError(f"connection.port must be between 1 and 65535, got: {port}")
+
+    # The password is never read from config.yaml - always via the provider
+    # (OS keyring), keyed by the name in 'password_env'.
+    password_key = str(raw.get("password_env", "TM1_METADICT_PWD")).strip()
+    if not password_key:
+        raise ConfigError(
+            "connection.password_env must name the keyring entry holding the password."
+        )
+    try:
+        password = provider.require_secret(password_key)
+    except CredentialError as exc:
+        raise ConfigError(
+            f"{exc} (store it with: tm1dd set-credential --name {password_key})"
+        ) from exc
+
+    # These are guaranteed non-None because required=True resolved them.
+    assert address is not None  # noqa: S101 - narrowing for type checkers
+    assert user is not None  # noqa: S101
 
     return ConnectionConfig(
         address=address,
@@ -192,7 +242,13 @@ def _build_run(raw: dict | None) -> RunConfig:
 def _build_logs(raw: dict | None) -> LogConfig:
     raw = raw or {}
     enabled = _as_bool(raw.get("enabled", True), field="logs.enabled")
-    log_path = _env_optional(raw.get("server_log_path_env", "TM1_LOG_PATH"))
+    log_path = _resolve(
+        raw,
+        "server_log_path",
+        field="logs.server_log_path",
+        required=False,
+        default_env_name="TM1_LOG_PATH",
+    )
     return LogConfig(
         enabled=enabled,
         server_log_path=log_path,
@@ -205,6 +261,13 @@ def _build_logs(raw: dict | None) -> LogConfig:
 # --------------------------------------------------------------------------- #
 # Environment selection
 # --------------------------------------------------------------------------- #
+def _merge(base: dict | None, override: dict | None) -> dict:
+    """Shallow-merge two config sections, with ``override`` winning."""
+    merged = dict(base or {})
+    merged.update(override or {})
+    return merged
+
+
 def _select_environment(
     raw: dict,
     environment: str | None,
@@ -214,9 +277,11 @@ def _select_environment(
     Supports two layouts:
 
     1. Multi-environment: an ``environments`` mapping plus an optional
-       ``default_environment``. The chosen block is returned.
-    2. Legacy single-block: no ``environments`` key; the raw mapping itself
-       is returned and the environment name is ``None``.
+       ``default_environment``. An optional top-level ``defaults`` block is
+       merged underneath the chosen environment, so settings shared by every
+       instance (host, user, ports policy, logging) are written once.
+    2. Legacy single-block: no ``environments`` key; the raw mapping itself is
+       returned and the environment name is ``None``.
     """
     environments = raw.get("environments")
 
@@ -244,11 +309,22 @@ def _select_environment(
     if block is None:
         available = ", ".join(sorted(environments))
         raise ConfigError(
-            f"Environment '{chosen}' not found in config.yaml. " f"Available: {available}"
+            f"Environment '{chosen}' not found in config.yaml. Available: {available}"
         )
 
     if not isinstance(block, dict):
         raise ConfigError(f"Environment '{chosen}' must be a mapping in config.yaml.")
+
+    # Merge the optional shared 'defaults' block underneath this environment.
+    defaults = raw.get("defaults") or {}
+    if defaults:
+        if not isinstance(defaults, dict):
+            raise ConfigError("'defaults' in config.yaml must be a mapping.")
+        block = {
+            "connection": _merge(defaults.get("connection"), block.get("connection")),
+            "run": _merge(defaults.get("run"), block.get("run")),
+            "logs": _merge(defaults.get("logs"), block.get("logs")),
+        }
 
     return block, chosen
 
@@ -271,17 +347,19 @@ def load_config(
             If ``None``, ``default_environment`` is used (multi-env files) or
             the single top-level block is used (legacy files).
         env_path: path to a ``.env`` file to load. If ``None``, a ``.env`` next
-            to ``config.yaml`` is used when present.
-        provider: credential provider for secrets. Defaults to env-var provider.
+            to ``config.yaml`` is loaded **when present**. A ``.env`` is entirely
+            optional - values may be written directly in ``config.yaml``.
+        provider: credential provider for secrets. Defaults to the keyring.
 
     Raises:
-        ConfigError: if the file is missing, malformed, or any required value
-            is absent, or the requested environment does not exist.
+        ConfigError: if the file is missing, malformed, any required value is
+            absent, or the requested environment does not exist.
     """
     config_path = Path(config_path)
     if not config_path.exists():
         raise ConfigError(f"config.yaml not found at: {config_path}")
 
+    # A .env is optional. Load one only if explicitly given or found alongside.
     if env_path is not None:
         load_dotenv(env_path)
     else:

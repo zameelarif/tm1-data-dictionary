@@ -8,10 +8,6 @@ single, readable source of truth for the schema.
 A separate module (``bootstrap.py``) is responsible for *how* to create these objects in
 a TM1 instance. Keeping "what" and "how" apart means the schema can be reviewed, diffed,
 and tested on its own, and the creation logic stays small and focused.
-
-Phase 1 begins with the simplest cube in the specification - ``}Meta_Extraction_Audit`` -
-which records one row per extractor run. Proving the full create-and-write path on this
-one cube de-risks the rest of the schema.
 """
 
 from __future__ import annotations
@@ -69,7 +65,7 @@ class SchemaDef:
 # --------------------------------------------------------------------------- #
 # Defined once, reused, so a typo can't drift between definition and use.
 
-# --- }Meta_Extraction_Audit (the first, simplest cube) ---
+# --- }Meta_Extraction_Audit ---
 DIM_EXTRACTION_RUN = "}Meta_ExtractionRun"
 DIM_AUDIT_MEASURE = "}Meta_AuditMeasure"
 CUBE_EXTRACTION_AUDIT = "}Meta_Extraction_Audit"
@@ -106,6 +102,11 @@ CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
 DIM_UNRESOLVED_EXPRESSION = "}Meta_UnresolvedExpression"
 DIM_UNRESOLVED_MEASURE = "}Meta_UnresolvedMeasure"
 CUBE_UNRESOLVED_REFERENCE = "}Meta_Unresolved_Reference"
+
+# --- }Meta_Process_Function ---
+DIM_FUNCTION = "}Meta_Function"
+DIM_FUNCTION_MEASURE = "}Meta_FunctionMeasure"
+CUBE_PROCESS_FUNCTION = "}Meta_Process_Function"
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +169,15 @@ UNRESOLVED_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Role", STRING),  # CubeRead | CubeWrite (first occurrence)
     ElementDef("FirstBlock", STRING),  # block of the first occurrence
     ElementDef("FirstLine", NUMERIC),  # line of the first occurrence
+)
+
+# Measures for }Meta_Process_Function (one row per process/function).
+FUNCTION_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # how many times the process calls it
+    ElementDef("FirstBlock", STRING),  # block of the first call
+    ElementDef("FirstLine", NUMERIC),  # line of the first call
+    ElementDef("FirstArguments", STRING),  # arguments of the first call
+    ElementDef("Lines", STRING),  # all line numbers, comma-separated
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -307,9 +317,6 @@ def unresolved_reference_schema() -> SchemaDef:
     not resolve the variable/expression to a concrete cube name), grouped per
     (process, raw target expression). This turns the opaque "unresolved" count into a
     queryable, per-process manual-review work queue.
-
-    }Meta_Process and }Meta_UnresolvedExpression start with the seed element; the writer
-    adds real process names and expressions as they are discovered.
     """
     process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
     expression_dim = DimensionDef(DIM_UNRESOLVED_EXPRESSION, (SEED_ELEMENT,))
@@ -320,5 +327,31 @@ def unresolved_reference_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(process_dim, expression_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_function_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Function and its key dimensions.
+
+    Dimensioned }Meta_Process x }Meta_Function x }Meta_FunctionMeasure.
+
+    It records calls to functions on the user-maintained watch list
+    (``functions.txt``), aggregated to **one row per (process, function)**. The
+    measures keep the call count, the location and arguments of the first call, and
+    the full list of line numbers so every call site can still be found in the TI.
+
+    }Meta_Process and }Meta_Function start with the seed element; the writer adds
+    real process and function names as they are discovered.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    function_dim = DimensionDef(DIM_FUNCTION, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_FUNCTION_MEASURE, FUNCTION_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_FUNCTION,
+        (DIM_PROCESS, DIM_FUNCTION, DIM_FUNCTION_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, function_dim, measure_dim),
         cubes=(cube,),
     )

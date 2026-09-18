@@ -33,6 +33,10 @@ coverage.xml
 out/
 *.log
 !README.md
+offline/
+offline.zip
+dist/
+build/
 
 # Config with secrets
 config.yaml

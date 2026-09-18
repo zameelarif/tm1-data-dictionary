@@ -11,6 +11,7 @@ The pipeline populates:
 - ``}Meta_Chore_Process`` for scheduled process execution
 - ``}Meta_Process_Dimension`` for dimension and attribute maintenance
 - ``}Meta_Unresolved_Reference`` for cube targets that stayed dynamic
+- ``}Meta_Process_Function`` for calls to watch-listed functions
 
 Design principles:
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from tm1_data_dictionary.chore_reader import ChoreReader
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
@@ -46,6 +48,11 @@ from tm1_data_dictionary.parser.diagnostics import (
 from tm1_data_dictionary.parser.dim_rollup import (
     DimLineageRow,
     rollup_dim_lineage,
+)
+from tm1_data_dictionary.parser.function_scan import (
+    FunctionCall,
+    load_watchlist,
+    scan_functions,
 )
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import (
@@ -74,6 +81,10 @@ from tm1_data_dictionary.writers.process_dimension_writer import (
     clear_process_dimension,
     write_dimension_lineage,
 )
+from tm1_data_dictionary.writers.process_function_writer import (
+    clear_process_function,
+    write_function_usage,
+)
 from tm1_data_dictionary.writers.unresolved_writer import (
     clear_unresolved_references,
     write_unresolved_references,
@@ -100,10 +111,13 @@ class ExtractionSummary:
     chore_rows_written: int = 0
     dimension_rows_written: int = 0
     unresolved_rows_written: int = 0
+    function_rows_written: int = 0
 
     unresolved_cube_refs: int = 0
     unresolved_chain_refs: int = 0
     unresolved_dim_refs: int = 0
+
+    watched_functions: int = 0
 
     excluded_names: list[str] = field(default_factory=list)
     failed_names: list[tuple[str, str]] = field(default_factory=list)
@@ -115,21 +129,26 @@ class ExtractionSummary:
 
         written_suffix = " (dry-run: not written)" if self.dry_run else " written"
 
+        function_line = f"Function-usage rows: {self.function_rows_written}{written_suffix}"
+        if self.watched_functions == 0:
+            function_line += "  (no watch list found)"
+
         lines = [
             (
                 f"Processes: {self.total_processes} total, "
                 f"{self.included} included, {self.excluded} excluded"
             ),
             f"Parsed OK: {self.parsed_ok}, failed: {self.failed}",
-            (f"Cube-lineage rows: " f"{self.cube_rows_written}{written_suffix}"),
-            (f"Chain-lineage rows: " f"{self.chain_rows_written}{written_suffix}"),
-            (f"Datasource rows: " f"{self.datasource_rows_written}{written_suffix}"),
-            (f"Chore rows: " f"{self.chore_rows_written}{written_suffix}"),
-            (f"Dimension rows: " f"{self.dimension_rows_written}{written_suffix}"),
-            (f"Unresolved-reference rows: " f"{self.unresolved_rows_written}{written_suffix}"),
-            (f"Unresolved cube references: " f"{self.unresolved_cube_refs}"),
-            (f"Unresolved chain references: " f"{self.unresolved_chain_refs}"),
-            (f"Unresolved dimension references: " f"{self.unresolved_dim_refs}"),
+            f"Cube-lineage rows: {self.cube_rows_written}{written_suffix}",
+            f"Chain-lineage rows: {self.chain_rows_written}{written_suffix}",
+            f"Datasource rows: {self.datasource_rows_written}{written_suffix}",
+            f"Chore rows: {self.chore_rows_written}{written_suffix}",
+            f"Dimension rows: {self.dimension_rows_written}{written_suffix}",
+            f"Unresolved-reference rows: {self.unresolved_rows_written}{written_suffix}",
+            function_line,
+            f"Unresolved cube references: {self.unresolved_cube_refs}",
+            f"Unresolved chain references: {self.unresolved_chain_refs}",
+            f"Unresolved dimension references: {self.unresolved_dim_refs}",
         ]
 
         if self.failed_names:
@@ -142,6 +161,7 @@ class ExtractionSummary:
 def _extract_one(
     reader: TIReader,
     name: str,
+    watched: dict[str, str],
 ) -> tuple[
     list[CubeLineageRow],
     int,
@@ -151,6 +171,7 @@ def _extract_one(
     int,
     DatasourceRow | None,
     list[UnresolvedOccurrence],
+    list[FunctionCall],
 ]:
     """Parse one process and return all supported lineage results.
 
@@ -164,41 +185,29 @@ def _extract_one(
     6. Unresolved dimension-reference count
     7. Datasource row, when the process has a datasource
     8. Unresolved cube-reference occurrences (for }Meta_Unresolved_Reference)
+    9. Watch-listed function calls (for }Meta_Process_Function)
     """
 
     ti = reader.read(name)
     lines = code_lines(ti)
     const_table = build_const_table(lines)
 
-    refs = extract_references(
-        lines,
-        const_table=const_table,
-    )
+    refs = extract_references(lines, const_table=const_table)
 
-    cube_result = rollup_cube_lineage(
-        ti.name,
-        refs,
-    )
-
-    chain_result = rollup_chain_lineage(
-        ti.name,
-        refs,
-    )
-
-    dimension_result = rollup_dim_lineage(
-        ti.name,
-        refs,
-    )
+    cube_result = rollup_cube_lineage(ti.name, refs)
+    chain_result = rollup_chain_lineage(ti.name, refs)
+    dimension_result = rollup_dim_lineage(ti.name, refs)
 
     process_datasource_row = datasource_row(
         ti.name,
         getattr(ti, "datasource", None),
     )
 
-    unresolved_occurrences = collect_unresolved(
-        ti.name,
-        refs,
-    )
+    unresolved_occurrences = collect_unresolved(ti.name, refs)
+
+    # Function capture is independent of the lineage whitelist: it scans the same
+    # logical lines for whatever the user listed in functions.txt.
+    function_calls = scan_functions(ti.name, lines, watched)
 
     return (
         list(cube_result.rows),
@@ -209,6 +218,7 @@ def _extract_one(
         dimension_result.unresolved_count,
         process_datasource_row,
         unresolved_occurrences,
+        function_calls,
     )
 
 
@@ -217,23 +227,32 @@ def extract_all(
     *,
     rules: ExclusionRules | None = None,
     progress: ProgressFn | None = None,
+    functions_file: str | Path | None = None,
 ) -> ExtractionSummary:
-    """Extract lineage for every included process in the TM1 instance."""
+    """Extract lineage for every included process in the TM1 instance.
+
+    Args:
+        client: an open TM1 client.
+        rules: exclusion rules; defaults to :meth:`ExclusionRules.default`.
+        progress: optional per-process progress callback.
+        functions_file: path to the function watch list. A missing or omitted
+            file simply means no function usage is captured.
+    """
 
     rules = rules or ExclusionRules.default()
     reader = TIReader(client)
 
+    watched = load_watchlist(functions_file)
+
     summary = ExtractionSummary(
         dry_run=client.dry_run,
+        watched_functions=len(watched),
     )
 
     all_process_names = reader.list_process_names()
     summary.total_processes = len(all_process_names)
 
-    partition_result = partition(
-        all_process_names,
-        rules,
-    )
+    partition_result = partition(all_process_names, rules)
 
     summary.included = partition_result.included_count
     summary.excluded = partition_result.excluded_count
@@ -247,19 +266,19 @@ def extract_all(
         clear_chore_process(client)
         clear_process_dimension(client)
         clear_unresolved_references(client)
+        if watched:
+            clear_process_function(client)
 
     all_cube_rows: list[CubeLineageRow] = []
     all_chain_rows: list[ChainRow] = []
     all_datasource_rows: list[DatasourceRow] = []
     all_dimension_rows: list[DimLineageRow] = []
     all_unresolved: list[UnresolvedOccurrence] = []
+    all_function_calls: list[FunctionCall] = []
 
     total_included = len(partition_result.included)
 
-    for index, process_name in enumerate(
-        partition_result.included,
-        start=1,
-    ):
+    for index, process_name in enumerate(partition_result.included, start=1):
         try:
             (
                 cube_rows,
@@ -270,15 +289,14 @@ def extract_all(
                 unresolved_dimension_count,
                 process_datasource_row,
                 unresolved_occurrences,
-            ) = _extract_one(
-                reader,
-                process_name,
-            )
+                function_calls,
+            ) = _extract_one(reader, process_name, watched)
 
             all_cube_rows.extend(cube_rows)
             all_chain_rows.extend(chain_rows)
             all_dimension_rows.extend(dimension_rows)
             all_unresolved.extend(unresolved_occurrences)
+            all_function_calls.extend(function_calls)
 
             if process_datasource_row is not None:
                 all_datasource_rows.append(process_datasource_row)
@@ -293,36 +311,23 @@ def extract_all(
                 f"{len(chain_rows)} chain, "
                 f"{len(dimension_rows)} dimension rows"
             )
+            if function_calls:
+                status += f", {len(function_calls)} fn"
 
         except Exception as exc:  # noqa: BLE001
             summary.failed += 1
-            summary.failed_names.append(
-                (
-                    process_name,
-                    f"{type(exc).__name__}: {exc}",
-                )
-            )
+            summary.failed_names.append((process_name, f"{type(exc).__name__}: {exc}"))
             status = "FAILED"
 
         if progress is not None:
-            progress(
-                index,
-                total_included,
-                process_name,
-                status,
-            )
+            progress(index, total_included, process_name, status)
 
     # Chores are instance-level metadata and are therefore read once.
     try:
         chore_rows = ChoreReader(client).read_all()
     except Exception as exc:  # noqa: BLE001
         chore_rows = []
-        summary.failed_names.append(
-            (
-                "<chores>",
-                f"{type(exc).__name__}: {exc}",
-            )
-        )
+        summary.failed_names.append(("<chores>", f"{type(exc).__name__}: {exc}"))
 
     if client.dry_run:
         summary.cube_rows_written = len(all_cube_rows)
@@ -330,41 +335,19 @@ def extract_all(
         summary.datasource_rows_written = len(all_datasource_rows)
         summary.chore_rows_written = len(chore_rows)
         summary.dimension_rows_written = len(all_dimension_rows)
-        summary.unresolved_rows_written = write_unresolved_references(
-            client,
-            all_unresolved,
-        )
+        summary.unresolved_rows_written = write_unresolved_references(client, all_unresolved)
+        summary.function_rows_written = len(all_function_calls)
 
         return summary
 
-    summary.cube_rows_written = write_cube_lineage(
-        client,
-        all_cube_rows,
-    )
+    summary.cube_rows_written = write_cube_lineage(client, all_cube_rows)
+    summary.chain_rows_written = write_chain_lineage(client, all_chain_rows)
+    summary.datasource_rows_written = write_datasource_lineage(client, all_datasource_rows)
+    summary.chore_rows_written = write_chore_lineage(client, chore_rows)
+    summary.dimension_rows_written = write_dimension_lineage(client, all_dimension_rows)
+    summary.unresolved_rows_written = write_unresolved_references(client, all_unresolved)
 
-    summary.chain_rows_written = write_chain_lineage(
-        client,
-        all_chain_rows,
-    )
-
-    summary.datasource_rows_written = write_datasource_lineage(
-        client,
-        all_datasource_rows,
-    )
-
-    summary.chore_rows_written = write_chore_lineage(
-        client,
-        chore_rows,
-    )
-
-    summary.dimension_rows_written = write_dimension_lineage(
-        client,
-        all_dimension_rows,
-    )
-
-    summary.unresolved_rows_written = write_unresolved_references(
-        client,
-        all_unresolved,
-    )
+    if watched:
+        summary.function_rows_written = write_function_usage(client, all_function_calls)
 
     return summary

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tm1-data-dictionary"
-version = "0.1.0"
+version = "0.1.1"
 description = "Native TM1 data dictionary: static parser + }Meta_* schema for IBM Planning Analytics"
 readme = "README.md"
 requires-python = ">=3.10"
