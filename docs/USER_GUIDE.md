@@ -15,6 +15,7 @@ Every command that talks to TM1 accepts `--env <name>` and `--config <path>`.
 |---|---|
 | `tm1dd set-credential --name <entry>` | Store a password in the OS keyring |
 | `tm1dd bootstrap [--drop-legacy]` | Create every `}Meta_*` dimension and cube. Safe to re-run; existing objects are left untouched. `--drop-legacy` deletes cubes renamed in schema 1.6 |
+| `tm1dd create-views [--prefix <text>]` | Create or replace public views on every `}Meta_*` cube (see [Saved views](#saved-views)) |
 | `tm1dd record-run --status <text>` | Write a test row to `}Meta_Extraction_Audit` to prove the write path |
 
 ### Whole-model extraction
@@ -101,6 +102,48 @@ the element. Any row means a rule or feeder names it.
 
 **"Why are some cube targets missing from the lineage?"** – `tm1dd diagnose-unresolved`,
 or `}Meta_Process_Unresolved`.
+
+---
+
+## Saved views
+
+`tm1dd create-views --env <name>` creates public MDX views on every `}Meta_*` cube, so
+everyone starts from the same views in PAfE, PAW or Architect. Every view name starts with
+`tm1dd` (change it with `--prefix`), so they sort together. Re-running replaces them, which
+is how they pick up changes after an upgrade. Cubes not yet bootstrapped are skipped.
+
+Each view puts the cube's name dimensions on rows and all its measures on columns, with
+zero suppression, so only populated rows appear.
+
+### Default views
+
+Every cube has `tm1dd All`, which shows every row.
+
+### Case views
+
+| Cube | View | Shows |
+|---|---|---|
+| `}Meta_Process_Cube` | `tm1dd Cube Writers` | Which process writes to which cube |
+| `}Meta_Process_Cube` | `tm1dd Missing Cubes` | Processes referencing a cube that does not exist |
+| `}Meta_Process_Datasource` | `tm1dd File Loaders` | Processes loading from files |
+| `}Meta_Process_Datasource` | `tm1dd ODBC Loaders` | Processes loading from ODBC |
+| `}Meta_Process_Dimension` | `tm1dd Dimension Builders` | Processes inserting elements into dimensions |
+| `}Meta_Rule_Cube` | `tm1dd SkipCheck Cubes` | Cubes with SKIPCHECK, which rely on feeders |
+| `}Meta_Rule_Dependency` | `tm1dd Dangling Cubes` | Rules reading or feeding a cube that does not exist |
+| `}Meta_Rule_Dependency` | `tm1dd Feeds Into` | Feeders that feed other cubes |
+| `}Meta_Rule_Element_Reference` | `tm1dd Broken References` | Rules and feeders naming an element that does not exist |
+| `}Meta_Rule_Element_Reference` | `tm1dd Not Checked` | References that could not be checked |
+| `}Meta_Rule_Element_Reference` | `tm1dd Ambiguous` | Elements found in more than one dimension |
+| `}Meta_Rule_Element_Reference` | `tm1dd Feeder Targets` | Every element a feeder feeds |
+| `}Meta_Rule_Function` | `tm1dd Hierarchy Functions` | Rules affected by hierarchy changes |
+| `}Meta_Rule_Function` | `tm1dd Attribute Functions` | Rules affected by attribute renames |
+
+Views are defined in `src/tm1_data_dictionary/views.py` as plain data; add a `ViewDef` to
+create a new one. A view can fix a dimension to one element (`pin`) or keep only rows where
+a string measure has a value (`where`).
+
+To check one element before renaming it, open `tm1dd All` on
+`}Meta_Rule_Element_Reference` and filter `}Meta_Element` to that element.
 
 ---
 

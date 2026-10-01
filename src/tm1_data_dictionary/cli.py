@@ -47,6 +47,7 @@ from tm1_data_dictionary.schema import (
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
+from tm1_data_dictionary.views import DEFAULT_PREFIX, create_views
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
@@ -215,6 +216,48 @@ def bootstrap(config_path: str, environment: str | None, drop_legacy: bool) -> N
         click.echo("Bootstrap complete: schema created.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
+
+
+@main.command(name="create-views")
+@_config_option
+@_env_option
+@click.option(
+    "--prefix",
+    default=DEFAULT_PREFIX,
+    show_default=True,
+    help="Text every view name starts with.",
+)
+def create_views_cmd(config_path: str, environment: str | None, prefix: str) -> None:
+    """Create (or replace) public views on every }Meta_* cube.
+
+    One default view per cube ('<prefix> All') plus focused views such as
+    'Broken References', 'Missing Cubes' and 'Hierarchy Functions'. Re-run after an
+    upgrade to refresh them. Honours dry-run mode.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+    try:
+        with TM1Client(cfg) as client:
+            result = create_views(client, prefix=prefix)
+            dry = client.dry_run
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    verb = "would write" if dry else "wrote"
+    for label in result.written:
+        click.echo(f"  {verb}  {label}")
+    for label in result.skipped_no_cube:
+        click.echo(f"  skipped (cube missing - run bootstrap)  {label}")
+    for label in result.skipped_no_element:
+        click.echo(f"  skipped (nothing to show yet)  {label}")
+    for label, error in result.failed:
+        click.echo(f"  FAILED  {label}: {error}")
+    skipped = len(result.skipped_no_cube) + len(result.skipped_no_element)
+    click.echo(
+        f"{len(result.written)} view(s) {verb}, {skipped} skipped, {len(result.failed)} failed."
+    )
+    if result.failed:
+        raise click.ClickException("Some views could not be created (see above).")
 
 
 @main.command(name="record-run")
