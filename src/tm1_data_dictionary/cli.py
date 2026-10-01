@@ -493,6 +493,8 @@ def extract(
     """Extract cube, chain, datasource, chore, dimension, and function usage for
     EVERY process.
 
+    Also flags, per cube-lineage row, whether the referenced cube exists (CubeExists).
+
     Applies exclusion rules. One malformed process does not abort the run. Records the
     run (who/when/status) into }Meta_Extraction_Audit. Honours dry-run mode.
     """
@@ -546,6 +548,7 @@ def extract(
                             "unresolved_cube_refs": summary.unresolved_cube_refs,
                             "unresolved_chain_refs": summary.unresolved_chain_refs,
                             "unresolved_dim_refs": summary.unresolved_dim_refs,
+                            "missing_cube_refs": summary.missing_cube_refs,
                         },
                     )
                     audit_recorded = True

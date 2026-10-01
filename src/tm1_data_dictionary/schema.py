@@ -145,6 +145,7 @@ PROCESS_CUBE_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Count", NUMERIC),
     ElementDef("FirstBlock", STRING),
     ElementDef("FirstLine", NUMERIC),
+    ElementDef("CubeExists", STRING),  # Yes | No - No means the TI references a missing cube
 )
 
 # Measures for }Meta_Process_Chain.

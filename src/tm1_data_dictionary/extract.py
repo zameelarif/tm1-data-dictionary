@@ -5,7 +5,8 @@ pipeline behind ``tm1dd extract``.
 
 The pipeline populates:
 
-- ``}Meta_Process_Cube`` for process-to-cube lineage
+- ``}Meta_Process_Cube`` for process-to-cube lineage, including whether each
+  referenced cube actually exists (``CubeExists``)
 - ``}Meta_Process_Chain`` for process dependencies
 - ``}Meta_Process_Datasource`` for process datasources
 - ``}Meta_Chore_Process`` for scheduled process execution
@@ -18,7 +19,7 @@ Design principles:
 - Exclusions are applied before process parsing.
 - A malformed process does not abort the full extraction.
 - Each process is parsed once, then rolled up into multiple lineage types.
-- Chores are retrieved once because they are instance-level metadata.
+- Chores and cube names are retrieved once because they are instance-level metadata.
 - Target lineage cubes are cleared once before writing.
 - Dry-run performs parsing and reporting without clearing or writing.
 """
@@ -69,6 +70,10 @@ from tm1_data_dictionary.writers.process_chore_writer import (
     clear_chore_process,
     write_chore_lineage,
 )
+from tm1_data_dictionary.writers.process_cube_exists_writer import (
+    count_missing,
+    write_cube_exists,
+)
 from tm1_data_dictionary.writers.process_cube_writer import (
     clear_process_cube,
     write_cube_lineage,
@@ -117,6 +122,8 @@ class ExtractionSummary:
     unresolved_chain_refs: int = 0
     unresolved_dim_refs: int = 0
 
+    missing_cube_refs: int = 0  # cube-lineage rows whose cube does not exist
+
     watched_functions: int = 0
 
     excluded_names: list[str] = field(default_factory=list)
@@ -149,6 +156,7 @@ class ExtractionSummary:
             f"Unresolved cube references: {self.unresolved_cube_refs}",
             f"Unresolved chain references: {self.unresolved_chain_refs}",
             f"Unresolved dimension references: {self.unresolved_dim_refs}",
+            f"Cube references to missing cubes: {self.missing_cube_refs}",
         ]
 
         if self.failed_names:
@@ -252,6 +260,10 @@ def extract_all(
     all_process_names = reader.list_process_names()
     summary.total_processes = len(all_process_names)
 
+    # Every cube in the instance, including control cubes, so a TI that targets a
+    # }-prefixed cube is not mistaken for a reference to a missing cube.
+    known_cubes = list(client.service.cubes.get_all_names(skip_control_cubes=False))
+
     partition_result = partition(all_process_names, rules)
 
     summary.included = partition_result.included_count
@@ -322,6 +334,8 @@ def extract_all(
         if progress is not None:
             progress(index, total_included, process_name, status)
 
+    summary.missing_cube_refs = count_missing(all_cube_rows, known_cubes)
+
     # Chores are instance-level metadata and are therefore read once.
     try:
         chore_rows = ChoreReader(client).read_all()
@@ -336,11 +350,14 @@ def extract_all(
         summary.chore_rows_written = len(chore_rows)
         summary.dimension_rows_written = len(all_dimension_rows)
         summary.unresolved_rows_written = write_unresolved_references(client, all_unresolved)
-        summary.function_rows_written = len(all_function_calls)
-
+        if watched:
+            summary.function_rows_written = write_function_usage(client, all_function_calls)
         return summary
 
     summary.cube_rows_written = write_cube_lineage(client, all_cube_rows)
+    # Runs after the lineage write, which creates the process and cube elements.
+    write_cube_exists(client, all_cube_rows, known_cubes)
+
     summary.chain_rows_written = write_chain_lineage(client, all_chain_rows)
     summary.datasource_rows_written = write_datasource_lineage(client, all_datasource_rows)
     summary.chore_rows_written = write_chore_lineage(client, chore_rows)
