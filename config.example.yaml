@@ -1,0 +1,28 @@
+# tm1dd configuration example. Copy to config.yaml and edit.
+# The password is never stored here: 'password_env' names an OS keyring entry, created with
+#     tm1dd set-credential --name TM1_DEV_PWD
+
+default_environment: dev
+
+defaults:
+  connection:
+    address: tm1server01
+    ssl: true
+    auth_mode: basic
+    user: TM1_SERVICE_USER
+    password_env: TM1_DEV_PWD
+    namespace: ""
+  run:
+    dry_run: true              # set false when ready to write
+    max_requests_per_second: 20
+  logs:
+    enabled: true
+    copy_logs_locally: true
+
+environments:
+  dev:
+    connection:
+      port: 10019
+  test:
+    connection:
+      port: 10020

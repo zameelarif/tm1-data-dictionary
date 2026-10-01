@@ -1,9 +1,9 @@
-"""Flag whether each cube a TI process references actually exists.
+﻿"""Flag whether each cube a TI process references actually exists.
 
 Adds a ``CubeExists`` measure (Yes | No) to every row already written into
 ``}Meta_Process_Cube``, so a developer or administrator can slice *"which processes read
 from or write to a cube that no longer exists?"* - the TI equivalent of the
-``RelatedCubeExists`` measure on ``}Meta_Cube_Rule_Dependency``.
+``RelatedCubeExists`` measure on ``}Meta_Rule_Dependency``.
 
 A TI that targets a missing cube usually fails at run time (CellPutN/CellGetN raise an
 error), but only when that code path actually runs. Flagging it statically surfaces

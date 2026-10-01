@@ -2,7 +2,10 @@
 
 Every object `tm1dd bootstrap` creates. All names start with `}Meta_`, so they sit with the
 other control objects and are hidden from normal users unless *Display Control Objects*
-is on. Schema version: **1.5**.
+is on. Schema version: **1.6**.
+
+Naming: every TI lineage cube starts `}Meta_Process_` and every rules cube starts
+`}Meta_Rule_`, so each group sorts together. The audit cube is `}Meta_Extraction_Audit`.
 
 Shared dimensions (one dimension, used by several cubes, so views can pivot between them):
 
@@ -60,7 +63,10 @@ Written by `tm1dd extract`. See [TI lineage](TI_LINEAGE.md).
 | `Count` | N | Always 1 (keeps rows visible under zero suppression) |
 | `Detail` | S | ODBC query or view's cube |
 
-### `}Meta_Chore_Process`
+### `}Meta_Process_Chore`
+
+*Named `}Meta_Chore_Process` before schema 1.6.*
+
 
 `}Meta_Chore` × `}Meta_Process` × `}Meta_ChoreProcessMeasure`
 
@@ -84,7 +90,10 @@ Written by `tm1dd extract`. See [TI lineage](TI_LINEAGE.md).
 | `FirstBlock` | S | Block of the first reference |
 | `FirstLine` | N | Line of the first reference |
 
-### `}Meta_Unresolved_Reference`
+### `}Meta_Process_Unresolved`
+
+*Named `}Meta_Unresolved_Reference` before schema 1.6.*
+
 
 `}Meta_Process` × `}Meta_UnresolvedExpression` × `}Meta_UnresolvedMeasure`
 
@@ -128,7 +137,10 @@ Written by `tm1dd extract-rules`. See [Rules analysis](RULES_ANALYSIS.md).
 | `FeederStatementCount` | N | Statements after `FEEDERS;` |
 | `DimensionCount` | N | Dimensions on the cube |
 
-### `}Meta_Cube_Rule_Dependency` (2b)
+### `}Meta_Rule_Dependency` (2b)
+
+*Named `}Meta_Cube_Rule_Dependency` before schema 1.6.*
+
 
 `}Meta_Cube` × `}Meta_Rule_RelatedCube` × `}Meta_RuleDependencyType` × `}Meta_RuleDependencyMeasure`
 

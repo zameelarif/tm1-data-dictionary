@@ -94,15 +94,15 @@ DIM_DIM_ROLE = "}Meta_DimRole"
 DIM_PROCESS_DIM_MEASURE = "}Meta_ProcessDimMeasure"
 CUBE_PROCESS_DIMENSION = "}Meta_Process_Dimension"
 
-# --- }Meta_Chore_Process ---
+# --- }Meta_Process_Chore ---
 DIM_CHORE = "}Meta_Chore"
 DIM_CHORE_PROCESS_MEASURE = "}Meta_ChoreProcessMeasure"
-CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
+CUBE_CHORE_PROCESS = "}Meta_Process_Chore"  # was }Meta_Chore_Process (schema < 1.6)
 
-# --- }Meta_Unresolved_Reference ---
+# --- }Meta_Process_Unresolved ---
 DIM_UNRESOLVED_EXPRESSION = "}Meta_UnresolvedExpression"
 DIM_UNRESOLVED_MEASURE = "}Meta_UnresolvedMeasure"
-CUBE_UNRESOLVED_REFERENCE = "}Meta_Unresolved_Reference"
+CUBE_UNRESOLVED_REFERENCE = "}Meta_Process_Unresolved"  # was }Meta_Unresolved_Reference
 
 # --- }Meta_Process_Function ---
 DIM_FUNCTION = "}Meta_Function"
@@ -113,11 +113,11 @@ CUBE_PROCESS_FUNCTION = "}Meta_Process_Function"
 DIM_RULE_CUBE_MEASURE = "}Meta_RuleCubeMeasure"
 CUBE_RULE_CUBE = "}Meta_Rule_Cube"
 
-# --- }Meta_Cube_Rule_Dependency (Phase 2b - rules) ---
+# --- }Meta_Rule_Dependency (Phase 2b - rules) ---
 DIM_RULE_RELATED_CUBE = "}Meta_Rule_RelatedCube"
 DIM_RULE_DEPENDENCY_TYPE = "}Meta_RuleDependencyType"
 DIM_RULE_DEPENDENCY_MEASURE = "}Meta_RuleDependencyMeasure"
-CUBE_RULE_DEPENDENCY = "}Meta_Cube_Rule_Dependency"
+CUBE_RULE_DEPENDENCY = "}Meta_Rule_Dependency"  # was }Meta_Cube_Rule_Dependency
 
 # --- }Meta_Rule_Element_Reference (Phase 2c - rules) ---
 DIM_ELEMENT = "}Meta_Element"
@@ -187,14 +187,14 @@ PROCESS_DIM_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("FirstLine", NUMERIC),
 )
 
-# Measures for }Meta_Chore_Process.
+# Measures for }Meta_Process_Chore.
 CHORE_PROCESS_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("StepOrder", NUMERIC),  # 0-based execution order within the chore
     ElementDef("Active", STRING),  # Yes | No
     ElementDef("Frequency", STRING),  # e.g. P1DT0H0M0S
 )
 
-# Measures for }Meta_Unresolved_Reference.
+# Measures for }Meta_Process_Unresolved.
 UNRESOLVED_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Count", NUMERIC),  # how many occurrences of this expression
     ElementDef("Role", STRING),  # CubeRead | CubeWrite (first occurrence)
@@ -229,14 +229,14 @@ RULE_CUBE_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("DimensionCount", NUMERIC),  # number of dimensions on the cube
 )
 
-# How the owning cube relates to the referenced cube in }Meta_Cube_Rule_Dependency.
+# How the owning cube relates to the referenced cube in }Meta_Rule_Dependency.
 RULE_DEPENDENCY_TYPE_ELEMENTS: tuple[ElementDef, ...] = (
     ElementDef("RuleRead", STRING),  # rule statement reads the related cube via DB()
     ElementDef("FeederTarget", STRING),  # feeder feeds into the related cube via DB()
     ElementDef("FeederLookup", STRING),  # DB() used inside a feeder to look something up
 )
 
-# Measures for }Meta_Cube_Rule_Dependency (one row per cube / related cube / type).
+# Measures for }Meta_Rule_Dependency (one row per cube / related cube / type).
 RULE_DEPENDENCY_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Count", NUMERIC),  # how many DB() references were rolled into this row
     ElementDef("FirstLine", NUMERIC),  # rule-text line of the first reference
@@ -375,7 +375,7 @@ def process_datasource_schema() -> SchemaDef:
 
 
 def chore_process_schema() -> SchemaDef:
-    """Return the schema for }Meta_Chore_Process and its key dimensions.
+    """Return the schema for }Meta_Process_Chore and its key dimensions.
 
     Dimensioned }Meta_Chore x }Meta_Process x }Meta_ChoreProcessMeasure. The chore
     dimension holds chore names; the writer populates it at run time.
@@ -415,7 +415,7 @@ def process_dimension_schema() -> SchemaDef:
 
 
 def unresolved_reference_schema() -> SchemaDef:
-    """Return the schema for }Meta_Unresolved_Reference and its key dimensions.
+    """Return the schema for }Meta_Process_Unresolved and its key dimensions.
 
     Dimensioned }Meta_Process x }Meta_UnresolvedExpression x }Meta_UnresolvedMeasure.
     It records the cube reads/writes whose target stayed dynamic (const-propagation could
@@ -485,7 +485,7 @@ def rule_cube_schema() -> SchemaDef:
 
 
 def rule_dependency_schema() -> SchemaDef:
-    """Return the schema for }Meta_Cube_Rule_Dependency and its dimensions (Phase 2b).
+    """Return the schema for }Meta_Rule_Dependency and its dimensions (Phase 2b).
 
     Dimensioned }Meta_Cube x }Meta_Rule_RelatedCube x }Meta_RuleDependencyType x
     }Meta_RuleDependencyMeasure.
@@ -564,3 +564,13 @@ def rule_function_schema() -> SchemaDef:
         dimensions=(cube_dim, function_dim, measure_dim),
         cubes=(cube,),
     )
+
+
+# Cube names used before schema 1.6. Every TI cube now starts }Meta_Process_ and every
+# rules cube }Meta_Rule_, so they sort together. These old cubes are no longer written;
+# `tm1dd bootstrap --drop-legacy` deletes them (dimensions are unchanged and shared).
+LEGACY_CUBES: tuple[str, ...] = (
+    "}Meta_Chore_Process",
+    "}Meta_Unresolved_Reference",
+    "}Meta_Cube_Rule_Dependency",
+)

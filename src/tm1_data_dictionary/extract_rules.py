@@ -4,7 +4,7 @@ This is the rules equivalent of extract.py. Each included cube's rule text is re
 and rolled up into every rule fact:
 
 - Phase 2a - cube-level facts (rules? feeders? pragmas?) into }Meta_Rule_Cube.
-- Phase 2b - cross-cube DB() dependencies into }Meta_Cube_Rule_Dependency.
+- Phase 2b - cross-cube DB() dependencies into }Meta_Rule_Dependency.
 - Phase 2c - literal element references into }Meta_Rule_Element_Reference.
 - Phase 2d - function and keyword usage into }Meta_Rule_Function.
 

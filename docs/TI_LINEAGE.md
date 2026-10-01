@@ -22,9 +22,9 @@ tm1dd extract --env dev --functions D:\tm1dd\functions.txt
 | `}Meta_Process_Cube` | Which cubes does each process read and write? Does each cube still exist? |
 | `}Meta_Process_Chain` | Which processes does each process trigger? |
 | `}Meta_Process_Datasource` | Where does each process get its data (file, ODBC, view)? |
-| `}Meta_Chore_Process` | Which chores run which processes, in what order, and are they active? |
+| `}Meta_Process_Chore` | Which chores run which processes, in what order, and are they active? |
 | `}Meta_Process_Dimension` | Which processes insert elements or write attributes in each dimension? |
-| `}Meta_Unresolved_Reference` | Which cube targets could not be determined statically? |
+| `}Meta_Process_Unresolved` | Which cube targets could not be determined statically? |
 | `}Meta_Process_Function` | Where are watched functions (e.g. `ExecuteCommand`) called, and with what arguments? |
 
 Full measure lists are in the [schema reference](SCHEMA_REFERENCE.md#ti-lineage-cubes).
@@ -54,7 +54,7 @@ holds the literal source (file path, DSN or view), so processes sharing a source
 `Detail` holds the ODBC query or the view's cube. `Count` is always 1, which keeps rows
 visible under zero suppression. Processes with no datasource produce no row.
 
-### Chore lineage – `}Meta_Chore_Process`
+### Chore lineage – `}Meta_Process_Chore`
 
 Read directly from chore metadata (no parsing). `StepOrder` is the 0-based position of the
 process in the chore; `Active` and `Frequency` come from the chore schedule. Chores are
@@ -68,7 +68,7 @@ One row per (process, dimension, role):
   `HierarchyElementInsert`, `...ComponentAdd`).
 - `AttrWrite` – attribute writes (`AttrPutS`, `AttrPutN`, ...).
 
-### Unresolved references – `}Meta_Unresolved_Reference`
+### Unresolved references – `}Meta_Process_Unresolved`
 
 A cube target that stays an expression (for example a parameter such as `pCubeName`) is
 not written to `}Meta_Process_Cube`, because guessing would create false lineage. Instead
@@ -103,7 +103,7 @@ removed, and statements split across lines are joined. Then:
 2. **Constant propagation** – a variable assigned a literal (`cCube = 'Sales';`) is
    replaced by its value, following chains of variables. A variable assigned more than one
    value, or assigned inside `IF`/`WHILE`, is left unresolved rather than guessed.
-3. Anything still not a literal goes to `}Meta_Unresolved_Reference`.
+3. Anything still not a literal goes to `}Meta_Process_Unresolved`.
 
 To see why a target was not resolved, run:
 

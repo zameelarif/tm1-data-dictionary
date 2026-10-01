@@ -1,4 +1,4 @@
-"""Unit tests for the }Meta_Cube_Rule_Dependency writer."""
+"""Unit tests for the }Meta_Rule_Dependency writer."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def test_writes_cells_and_creates_elements(fake_tm1py_element: None) -> None:
     assert ("}Meta_Rule_RelatedCube", "CC Yearly Assumptions") in created
 
     cube, cells = service.cells.writes[0]
-    assert cube == "}Meta_Cube_Rule_Dependency"
+    assert cube == "}Meta_Rule_Dependency"
     key = ("General Ledger", "Employee", "RuleRead")
     assert cells[(*key, "Count")] == 2
     assert cells[(*key, "FirstLine")] == 9
@@ -132,4 +132,4 @@ def test_dry_run_counts_rows_and_writes_nothing(fake_tm1py_element: None) -> Non
 def test_clear(fake_tm1py_element: None) -> None:
     service = _FakeService()
     clear_rule_dependency(_client(service))
-    assert service.cells.cleared == ["}Meta_Cube_Rule_Dependency"]
+    assert service.cells.cleared == ["}Meta_Rule_Dependency"]

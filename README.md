@@ -38,8 +38,6 @@ tm1dd export-graph --env dev --out data_flow.html
 | [TI lineage](docs/TI_LINEAGE.md) | `tm1dd extract`: cubes, chains, datasources, chores, dimensions, functions |
 | [Rules analysis](docs/RULES_ANALYSIS.md) | `tm1dd extract-rules`: rule facts, dependencies, element references, functions |
 | [Schema reference](docs/SCHEMA_REFERENCE.md) | Every `}Meta_*` cube, dimension and measure |
-| [Build journal](docs/BUILD_JOURNAL.md) | How the project was built, step by step, with reasons; current state and how to resume |
-| [Learning log](docs/LEARNING_LOG.md) | The project on one page, then every concept used (Python, engineering, TM1, tooling) and playbooks |
 
 ## Requirements
 
@@ -55,6 +53,12 @@ pip install -e ".[dev]"
 pre-commit run --all-files   # black, ruff, mypy (line length 100)
 pytest -q
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `pre-commit run --all-files` and
+`pytest -q` before opening a pull request, and never include real model names, server
+names, credentials or client data in code, tests or issues.
 
 ## Licence
 

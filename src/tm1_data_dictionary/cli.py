@@ -32,6 +32,7 @@ from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.schema import (
+    LEGACY_CUBES,
     audit_schema,
     chore_process_schema,
     process_chain_schema,
@@ -50,7 +51,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.5"
+SCHEMA_VERSION = "1.6"
 
 
 # --------------------------------------------------------------------------- #
@@ -151,10 +152,18 @@ def set_credential(name: str) -> None:
 @main.command()
 @_config_option
 @_env_option
-def bootstrap(config_path: str, environment: str | None) -> None:
+@click.option(
+    "--drop-legacy",
+    is_flag=True,
+    default=False,
+    help="Also delete cubes from older schema versions that tm1dd no longer writes.",
+)
+def bootstrap(config_path: str, environment: str | None, drop_legacy: bool) -> None:
     """Create the }Meta_* schema (dimensions and cubes) in the target TM1 instance.
 
     Idempotent: objects that already exist are left untouched. Honours dry-run mode.
+    With --drop-legacy, cubes renamed in schema 1.6 are deleted under their old names
+    (only cubes - dimensions are shared and kept).
     """
     cfg = _load(config_path, environment)
     _echo_env(cfg)
@@ -175,8 +184,22 @@ def bootstrap(config_path: str, environment: str | None) -> None:
     try:
         with TM1Client(cfg) as client:
             results = tuple(ensure_schema(client, schema) for schema in schemas)
+            dropped: list[str] = []
+            if drop_legacy:
+                for name in LEGACY_CUBES:
+                    if not client.service.cubes.exists(name):
+                        continue
+                    if client.dry_run:
+                        click.echo(f"  would delete legacy cube {name} (dry-run)")
+                        continue
+                    client.ensure_writable("delete legacy cube")
+                    client.service.cubes.delete(name)
+                    dropped.append(name)
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
+
+    for name in dropped:
+        click.echo(f"  deleted legacy cube {name}")
 
     for result in results:
         for name in result.dimensions_created:
@@ -587,7 +610,7 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
     FEEDSTRINGS, UNDEFVALS), and rule/feeder statement counts, into }Meta_Rule_Cube.
 
     Phase 2b: every cross-cube DB() reference in rules and feeders, into
-    }Meta_Cube_Rule_Dependency (including references to cubes that do not exist).
+    }Meta_Rule_Dependency (including references to cubes that do not exist).
 
     Phase 2c: every literal element name in rules and feeders, resolved to its dimension
     and flagged ElementExists, into }Meta_Rule_Element_Reference.

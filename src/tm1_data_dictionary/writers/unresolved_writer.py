@@ -1,4 +1,4 @@
-"""Write unresolved cube-reference facts into the ``}Meta_Unresolved_Reference`` cube.
+﻿"""Write unresolved cube-reference facts into the ``}Meta_Process_Unresolved`` cube.
 
 Some cube reads/writes have a target that stayed *dynamic* - const-propagation could not
 safely resolve the variable/expression to a concrete cube name. Those references are
@@ -88,7 +88,7 @@ def _aggregate(occurrences: list[UnresolvedOccurrence]) -> list[_UnresolvedRow]:
 
 
 def clear_unresolved_references(client: TM1Client) -> None:
-    """Clear all cells in ``}Meta_Unresolved_Reference`` (full clear-and-reload)."""
+    """Clear all cells in ``}Meta_Process_Unresolved`` (full clear-and-reload)."""
     client.ensure_writable("clear unresolved references")
     client.service.cells.clear(cube=CUBE_UNRESOLVED_REFERENCE)
 

@@ -21,7 +21,7 @@ tm1dd extract-rules --env dev --quiet
 | Phase | Cube | Question it answers |
 |---|---|---|
 | 2a | `}Meta_Rule_Cube` | Does this cube have rules and feeders? Which pragmas are set? How big are the rules? |
-| 2b | `}Meta_Cube_Rule_Dependency` | Which cubes do this cube's rules read from or feed into? Do they all exist? |
+| 2b | `}Meta_Rule_Dependency` | Which cubes do this cube's rules read from or feed into? Do they all exist? |
 | 2c | `}Meta_Rule_Element_Reference` | Which rules and feeders name this element? Does every named element exist? |
 | 2d | `}Meta_Rule_Function` | Which functions do this cube's rules use (hierarchy, attribute, lookup ...)? |
 | 2e | *planned* | Feeder-gap detection: rules with no feeder, feeders that feed nothing |
@@ -66,7 +66,7 @@ as a size gauge rather than an exact count.
 
 ---
 
-## 2b – Cube dependencies: `}Meta_Cube_Rule_Dependency`
+## 2b – Cube dependencies: `}Meta_Rule_Dependency`
 
 Every `DB()` call in rules and feeders, one row per (cube, related cube, type):
 

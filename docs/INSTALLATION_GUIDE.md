@@ -99,6 +99,19 @@ tm1dd --version
 tm1dd bootstrap --env <name>     # creates any cubes added by the new release
 ```
 
+**Upgrading from schema 1.5 or earlier:** three cubes were renamed in 1.6 so that TI cubes
+and rules cubes sort together. After upgrading, run:
+
+```powershell
+tm1dd bootstrap --env <name> --drop-legacy
+tm1dd extract --env <name>
+tm1dd extract-rules --env <name>
+```
+
+`--drop-legacy` deletes the old cubes (`}Meta_Chore_Process`, `}Meta_Unresolved_Reference`,
+`}Meta_Cube_Rule_Dependency`); the next extractions fill the new ones. Dimensions are
+unchanged. Any saved views or reports on the old cube names must be re-pointed.
+
 If `tm1dd --version` shows the old number, check `pip show tm1_data_dictionary`. If pip
 has the new version, only `__init__.py` was not bumped.
 

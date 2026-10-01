@@ -1,4 +1,4 @@
-"""Unit tests for the }Meta_Unresolved_Reference writer."""
+"""Unit tests for the }Meta_Process_Unresolved writer."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_aggregates_per_process_expression(fake_tm1py_element: None) -> None:
     assert write_unresolved_references(_client(service), occurrences) == 2
 
     cube, cells = service.cells.writes[0]
-    assert cube == "}Meta_Unresolved_Reference"
+    assert cube == "}Meta_Process_Unresolved"
     assert cells[("P", "cCube", "Count")] == 2
     assert cells[("P", "cCube", "Role")] == "CubeRead"  # first occurrence wins
     assert cells[("P", "cCube", "FirstBlock")] == "Prolog"
@@ -144,4 +144,4 @@ def test_dry_run_counts_rows_and_writes_nothing(fake_tm1py_element: None) -> Non
 def test_clear(fake_tm1py_element: None) -> None:
     service = _FakeService()
     clear_unresolved_references(_client(service))
-    assert service.cells.cleared == ["}Meta_Unresolved_Reference"]
+    assert service.cells.cleared == ["}Meta_Process_Unresolved"]

@@ -1,0 +1,7 @@
+# Watch list for }Meta_Process_Function. Copy to functions.txt beside config.yaml.
+# One TI function per line; matching is case-insensitive. # starts a comment.
+ExecuteCommand
+ASCIIOutput
+TextOutput
+CubeSetLogChanges
+SaveDataAll

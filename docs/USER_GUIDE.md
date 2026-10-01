@@ -14,7 +14,7 @@ Every command that talks to TM1 accepts `--env <name>` and `--config <path>`.
 | Command | Purpose |
 |---|---|
 | `tm1dd set-credential --name <entry>` | Store a password in the OS keyring |
-| `tm1dd bootstrap` | Create every `}Meta_*` dimension and cube. Safe to re-run; existing objects are left untouched |
+| `tm1dd bootstrap [--drop-legacy]` | Create every `}Meta_*` dimension and cube. Safe to re-run; existing objects are left untouched. `--drop-legacy` deletes cubes renamed in schema 1.6 |
 | `tm1dd record-run --status <text>` | Write a test row to `}Meta_Extraction_Audit` to prove the write path |
 
 ### Whole-model extraction
@@ -90,17 +90,17 @@ other command's metrics empty. Comparing runs shows trends, e.g. a rise in
 `CubeWrite`. Then `}Meta_Process_Datasource` for where that process reads from.
 
 **"What breaks if I retire this process?"** – `}Meta_Process_Chain` with the process on
-the callee axis, and `}Meta_Chore_Process` for chores that run it.
+the callee axis, and `}Meta_Process_Chore` for chores that run it.
 
 **"Is this element safe to rename or delete?"** – `}Meta_Rule_Element_Reference`, filter
 the element. Any row means a rule or feeder names it.
 
 **"What is broken right now?"** – `}Meta_Rule_Element_Reference` with
-`ElementExists = No`, and `}Meta_Cube_Rule_Dependency` with `RelatedCubeExists = No`, and
+`ElementExists = No`, and `}Meta_Rule_Dependency` with `RelatedCubeExists = No`, and
 `}Meta_Process_Cube` with `CubeExists = No`.
 
 **"Why are some cube targets missing from the lineage?"** – `tm1dd diagnose-unresolved`,
-or `}Meta_Unresolved_Reference`.
+or `}Meta_Process_Unresolved`.
 
 ---
 

@@ -1,0 +1,4 @@
+# One term per line, case-insensitive. Blank lines and # comments are ignored.
+# Add client names, server names, user names, internal URLs and anything else that
+# must never appear in the public repository. This file is never exported.
+password=

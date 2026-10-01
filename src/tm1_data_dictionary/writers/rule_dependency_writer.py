@@ -1,4 +1,4 @@
-"""Write cross-cube rule dependencies into the ``}Meta_Cube_Rule_Dependency`` cube.
+﻿"""Write cross-cube rule dependencies into the ``}Meta_Rule_Dependency`` cube.
 
 Consumes aggregated :class:`~tm1_data_dictionary.parser.rules.rule_dependencies.DependencyRow`
 objects - one per (cube, related cube, dependency type) - so a developer or administrator
@@ -6,7 +6,7 @@ can slice *"which cubes does this cube's rule read from?"*, *"which cubes feed i
 cube?"* and *"which rules reference a cube that no longer exists?"* in PAfE.
 
 Cube shape:
-    }Meta_Cube_Rule_Dependency :  }Meta_Cube x }Meta_Rule_RelatedCube x
+    }Meta_Rule_Dependency :  }Meta_Cube x }Meta_Rule_RelatedCube x
                                   }Meta_RuleDependencyType x }Meta_RuleDependencyMeasure
 
 }Meta_Rule_RelatedCube is a second cube-name dimension (TM1 needs distinct dimension
@@ -45,7 +45,7 @@ def _load_element_class() -> Any:
 
 
 def clear_rule_dependency(client: TM1Client) -> None:
-    """Clear all cells in ``}Meta_Cube_Rule_Dependency`` (full clear-and-reload)."""
+    """Clear all cells in ``}Meta_Rule_Dependency`` (full clear-and-reload)."""
     client.ensure_writable("clear rule dependencies")
     client.service.cells.clear(cube=CUBE_RULE_DEPENDENCY)
 

@@ -1,4 +1,4 @@
-"""Orchestrate lineage extraction across every process in an instance.
+﻿"""Orchestrate lineage extraction across every process in an instance.
 
 This module composes the lineage extraction components into the single-pass
 pipeline behind ``tm1dd extract``.
@@ -9,9 +9,9 @@ The pipeline populates:
   referenced cube actually exists (``CubeExists``)
 - ``}Meta_Process_Chain`` for process dependencies
 - ``}Meta_Process_Datasource`` for process datasources
-- ``}Meta_Chore_Process`` for scheduled process execution
+- ``}Meta_Process_Chore`` for scheduled process execution
 - ``}Meta_Process_Dimension`` for dimension and attribute maintenance
-- ``}Meta_Unresolved_Reference`` for cube targets that stayed dynamic
+- ``}Meta_Process_Unresolved`` for cube targets that stayed dynamic
 - ``}Meta_Process_Function`` for calls to watch-listed functions
 
 Design principles:
@@ -192,7 +192,7 @@ def _extract_one(
     5. Dimension-lineage rows
     6. Unresolved dimension-reference count
     7. Datasource row, when the process has a datasource
-    8. Unresolved cube-reference occurrences (for }Meta_Unresolved_Reference)
+    8. Unresolved cube-reference occurrences (for }Meta_Process_Unresolved)
     9. Watch-listed function calls (for }Meta_Process_Function)
     """
 

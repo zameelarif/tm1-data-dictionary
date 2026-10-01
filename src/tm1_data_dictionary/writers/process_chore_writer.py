@@ -1,12 +1,12 @@
-"""Write chore -> process schedules into the ``}Meta_Chore_Process`` cube.
+﻿"""Write chore -> process schedules into the ``}Meta_Process_Chore`` cube.
 
 Consumes :class:`~tm1_data_dictionary.chore_reader.ChoreTaskRow`s and writes them into
-``}Meta_Chore_Process``, so a developer can slice *"what does this chore run, and in what
+``}Meta_Process_Chore``, so a developer can slice *"what does this chore run, and in what
 order?"* and *"what chore schedules this process?"* in PAfE - the automated-entry-point end
 of lineage.
 
 Cube shape (Phase 1 minimal):
-    }Meta_Chore_Process :  }Meta_Chore x }Meta_Process x }Meta_ChoreProcessMeasure
+    }Meta_Process_Chore :  }Meta_Chore x }Meta_Process x }Meta_ChoreProcessMeasure
 
 Measures per (chore, process):
     StepOrder - the 0-based execution order of that process within the chore
@@ -24,7 +24,7 @@ from tm1_data_dictionary.tm1_client import TM1Client
 
 DIM_CHORE = "}Meta_Chore"
 DIM_PROCESS = "}Meta_Process"
-CUBE_CHORE_PROCESS = "}Meta_Chore_Process"
+CUBE_CHORE_PROCESS = "}Meta_Process_Chore"
 
 STRING = "String"
 
@@ -45,7 +45,7 @@ def _ensure_element(service, dimension: str, name: str) -> None:  # noqa: ANN001
 
 
 def write_chore_lineage(client: TM1Client, rows: list[ChoreTaskRow]) -> int:
-    """Write chore-step rows into ``}Meta_Chore_Process``.
+    """Write chore-step rows into ``}Meta_Process_Chore``.
 
     Ensures the chore/process elements exist, then writes the measure cells.
 
@@ -58,7 +58,7 @@ def write_chore_lineage(client: TM1Client, rows: list[ChoreTaskRow]) -> int:
     if not rows:
         return 0
 
-    client.ensure_writable("write }Meta_Chore_Process")
+    client.ensure_writable("write }Meta_Process_Chore")
     service = client.service
 
     chores = {r.chore for r in rows}
@@ -80,6 +80,6 @@ def write_chore_lineage(client: TM1Client, rows: list[ChoreTaskRow]) -> int:
 
 
 def clear_chore_process(client: TM1Client) -> None:
-    """Clear all data from }Meta_Chore_Process (full clear-and-reload strategy)."""
-    client.ensure_writable("clear }Meta_Chore_Process")
+    """Clear all data from }Meta_Process_Chore (full clear-and-reload strategy)."""
+    client.ensure_writable("clear }Meta_Process_Chore")
     client.service.cells.clear(cube=CUBE_CHORE_PROCESS)

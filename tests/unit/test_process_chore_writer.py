@@ -1,4 +1,4 @@
-"""Unit tests for the }Meta_Chore_Process writer."""
+﻿"""Unit tests for the }Meta_Process_Chore writer."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def test_writes_cells_and_creates_elements(fake_tm1py_element: None) -> None:
 
     assert len(service.cells.writes) == 1
     cube, cellset = service.cells.writes[0]
-    assert cube == "}Meta_Chore_Process"
+    assert cube == "}Meta_Process_Chore"
     key = ("Nightly.Load", "Cube.GL.Load")
     assert cellset[(*key, "StepOrder")] == 2
     assert cellset[(*key, "Active")] == "Yes"
