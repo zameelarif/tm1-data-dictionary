@@ -119,6 +119,12 @@ DIM_RULE_DEPENDENCY_TYPE = "}Meta_RuleDependencyType"
 DIM_RULE_DEPENDENCY_MEASURE = "}Meta_RuleDependencyMeasure"
 CUBE_RULE_DEPENDENCY = "}Meta_Cube_Rule_Dependency"
 
+# --- }Meta_Rule_Element_Reference (Phase 2c - rules) ---
+DIM_ELEMENT = "}Meta_Element"
+DIM_RULE_ELEMENT_REF_TYPE = "}Meta_RuleElementRefType"
+DIM_RULE_ELEMENT_REF_MEASURE = "}Meta_RuleElementRefMeasure"
+CUBE_RULE_ELEMENT_REFERENCE = "}Meta_Rule_Element_Reference"
+
 
 # --------------------------------------------------------------------------- #
 # Seed element + role / measure element sets
@@ -234,6 +240,27 @@ RULE_DEPENDENCY_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("RelatedCubeExists", STRING),  # Yes | No - No means a dangling reference
 )
 
+# Where in the rule text an element is named, in }Meta_Rule_Element_Reference.
+RULE_ELEMENT_REF_TYPE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("Area", STRING),  # left-hand side of a rule
+    ElementDef("RuleReference", STRING),  # same-cube [...] inside a rule expression
+    ElementDef("FeederSource", STRING),  # left-hand side of a feeder
+    ElementDef("FeederTarget", STRING),  # [...] feeder target, or args of a target DB()
+    ElementDef("DBArgument", STRING),  # literal argument of any other DB()
+    ElementDef("Comparison", STRING),  # !Dim @= 'Element' / !Dim @<> 'Element'
+)
+
+# Measures for }Meta_Rule_Element_Reference (one row per cube/dimension/element/type).
+RULE_ELEMENT_REF_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # how many references were rolled into this row
+    ElementDef("FirstLine", NUMERIC),  # rule-text line of the first reference
+    ElementDef("FirstStatement", STRING),  # first referencing statement (truncated)
+    ElementDef("ElementExists", STRING),  # Yes | No | Unknown
+    ElementDef("Candidates", STRING),  # candidate dimensions when ambiguous
+    ElementDef("TargetCubes", STRING),  # cube(s) whose dimension holds the element
+    ElementDef("WrittenAs", STRING),  # element as written in the rule (alias / case)
+)
+
 # The measures captured for each extractor run. String where the value is text, Numeric
 # where it is a count or duration. Run metrics (row counts etc.) are added on first write
 # by the self-healing audit writer, so they are not listed here.
@@ -252,6 +279,8 @@ AUDIT_MEASURES: tuple[ElementDef, ...] = (
 # --------------------------------------------------------------------------- #
 # Schema builders
 # --------------------------------------------------------------------------- #
+
+
 def audit_schema() -> SchemaDef:
     """Return the schema for the ``}Meta_Extraction_Audit`` cube and its two dimensions."""
     run_dim = DimensionDef(DIM_EXTRACTION_RUN, (SEED_ELEMENT,))
@@ -462,5 +491,39 @@ def rule_dependency_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(cube_dim, related_dim, type_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def rule_element_reference_schema() -> SchemaDef:
+    """Return the schema for }Meta_Rule_Element_Reference and its dimensions (Phase 2c).
+
+    Dimensioned }Meta_Cube x }Meta_Dimension x }Meta_Element x }Meta_RuleElementRefType
+    x }Meta_RuleElementRefMeasure.
+
+    Records every literal element name in a cube's rules and feeders, so an administrator
+    can check whether an element is safe to rename or delete. }Meta_Cube is the cube that
+    owns the rule; }Meta_Dimension is the dimension the element belongs to (shared with
+    }Meta_Process_Dimension, so rules and TIs pivot on the same dimension axis);
+    }Meta_Element holds the element names. }Meta_RuleElementRefType says where in the
+    rule the element is named.
+    """
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    dimension_dim = DimensionDef(DIM_DIMENSION, (SEED_ELEMENT,))
+    element_dim = DimensionDef(DIM_ELEMENT, (SEED_ELEMENT,))
+    type_dim = DimensionDef(DIM_RULE_ELEMENT_REF_TYPE, RULE_ELEMENT_REF_TYPE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_RULE_ELEMENT_REF_MEASURE, RULE_ELEMENT_REF_MEASURES)
+    cube = CubeDef(
+        CUBE_RULE_ELEMENT_REFERENCE,
+        (
+            DIM_CUBE,
+            DIM_DIMENSION,
+            DIM_ELEMENT,
+            DIM_RULE_ELEMENT_REF_TYPE,
+            DIM_RULE_ELEMENT_REF_MEASURE,
+        ),
+    )
+    return SchemaDef(
+        dimensions=(cube_dim, dimension_dim, element_dim, type_dim, measure_dim),
         cubes=(cube,),
     )

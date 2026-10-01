@@ -41,6 +41,7 @@ from tm1_data_dictionary.schema import (
     process_function_schema,
     rule_cube_schema,
     rule_dependency_schema,
+    rule_element_reference_schema,
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
@@ -48,12 +49,14 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 
 
 # --------------------------------------------------------------------------- #
 # Shared options
 # --------------------------------------------------------------------------- #
+
+
 def _config_option(func):
     """Attach the --config option to a command."""
     return click.option(
@@ -154,23 +157,25 @@ def bootstrap(config_path: str, environment: str | None) -> None:
     """
     cfg = _load(config_path, environment)
     _echo_env(cfg)
-
+    schemas = (
+        audit_schema(),
+        process_cube_schema(),
+        process_chain_schema(),
+        process_datasource_schema(),
+        chore_process_schema(),
+        process_dimension_schema(),
+        unresolved_reference_schema(),
+        process_function_schema(),
+        rule_cube_schema(),
+        rule_dependency_schema(),
+        rule_element_reference_schema(),
+    )
     try:
         with TM1Client(cfg) as client:
-            r1 = ensure_schema(client, audit_schema())
-            r2 = ensure_schema(client, process_cube_schema())
-            r3 = ensure_schema(client, process_chain_schema())
-            r4 = ensure_schema(client, process_datasource_schema())
-            r5 = ensure_schema(client, chore_process_schema())
-            r6 = ensure_schema(client, process_dimension_schema())
-            r7 = ensure_schema(client, unresolved_reference_schema())
-            r8 = ensure_schema(client, process_function_schema())
-            r9 = ensure_schema(client, rule_cube_schema())
-            r10 = ensure_schema(client, rule_dependency_schema())
+            results = tuple(ensure_schema(client, schema) for schema in schemas)
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
@@ -204,7 +209,6 @@ def record_run(config_path: str, environment: str | None, status: str) -> None:
     """
     cfg = _load(config_path, environment)
     _echo_env(cfg)
-
     start = datetime.now(UTC)
     try:
         with TM1Client(cfg) as client:
@@ -232,7 +236,6 @@ def record_run(config_path: str, environment: str | None, status: str) -> None:
 def list_processes(config_path: str, environment: str | None, contains: str) -> None:
     """List TI process names in the instance (optionally filtered)."""
     cfg = _load(config_path, environment)
-
     needle = contains.lower()
     try:
         with TM1Client(cfg) as client:
@@ -253,7 +256,6 @@ def list_processes(config_path: str, environment: str | None, contains: str) -> 
 def inspect_process(name: str, config_path: str, environment: str | None) -> None:
     """Print a summary of a single TI process (blocks, datasource, variables, parameters)."""
     cfg = _load(config_path, environment)
-
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
@@ -295,7 +297,6 @@ def extract_refs(name: str, config_path: str, environment: str | None) -> None:
     literal values (e.g. WeeklySales) where it is safe to do so.
     """
     cfg = _load(config_path, environment)
-
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
@@ -323,8 +324,8 @@ def extract_refs(name: str, config_path: str, environment: str | None) -> None:
         else:
             target = f"({r.target})"  # still dynamic
         click.echo(f"  {r.block:<9} {r.line_no:>4}  {r.role.value:<10} {r.function:<20} {target}")
-    click.echo("")
 
+    click.echo("")
     counts: dict[str, int] = {}
     for r in refs:
         counts[r.role.value] = counts.get(r.role.value, 0) + 1
@@ -350,7 +351,6 @@ def show_vars(name: str, config_path: str, environment: str | None, all_assignme
     trace it by hand.
     """
     cfg = _load(config_path, environment)
-
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
@@ -361,6 +361,7 @@ def show_vars(name: str, config_path: str, environment: str | None, all_assignme
         raise click.ClickException(str(exc)) from exc
 
     variables = summarize_variables(code_lines(ti))
+
     click.echo(f"Process: {ti.name}")
     click.echo(f"Variables assigned in code: {len(variables)}")
     click.echo("")
@@ -396,13 +397,13 @@ def extract_cube(name: str, config_path: str, environment: str | None) -> None:
     Honours dry-run mode in config (parses and reports, but writes nothing).
     """
     cfg = _load(config_path, environment)
-
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
             if not reader.exists(name):
                 raise click.ClickException(f"Process not found: {name}")
             ti = reader.read(name)
+
             lines = code_lines(ti)
             const_table = build_const_table(lines)
             refs = extract_references(lines, const_table=const_table)
@@ -425,6 +426,7 @@ def extract_cube(name: str, config_path: str, environment: str | None) -> None:
             if client.dry_run:
                 click.echo("Dry-run: nothing written.")
                 return
+
             written = write_cube_lineage(client, list(result.rows))
             click.echo(f"Wrote {written} rows into }}Meta_Process_Cube.")
     except TM1ClientError as exc:
@@ -438,13 +440,13 @@ def extract_cube(name: str, config_path: str, environment: str | None) -> None:
 def extract_chain(name: str, config_path: str, environment: str | None) -> None:
     """Parse a TI's chain dependencies and write them into }Meta_Process_Chain."""
     cfg = _load(config_path, environment)
-
     try:
         with TM1Client(cfg) as client:
             reader = TIReader(client)
             if not reader.exists(name):
                 raise click.ClickException(f"Process not found: {name}")
             ti = reader.read(name)
+
             lines = code_lines(ti)
             const_table = build_const_table(lines)
             refs = extract_references(lines, const_table=const_table)
@@ -463,6 +465,7 @@ def extract_chain(name: str, config_path: str, environment: str | None) -> None:
             if client.dry_run:
                 click.echo("Dry-run: nothing written.")
                 return
+
             written = write_chain_lineage(client, list(result.rows))
             click.echo(f"Wrote {written} rows into }}Meta_Process_Chain.")
     except TM1ClientError as exc:
@@ -494,7 +497,6 @@ def extract(
     EVERY process.
 
     Also flags, per cube-lineage row, whether the referenced cube exists (CubeExists).
-
     Applies exclusion rules. One malformed process does not abort the run. Records the
     run (who/when/status) into }Meta_Extraction_Audit. Honours dry-run mode.
     """
@@ -561,7 +563,6 @@ def extract(
     click.echo("Extraction complete.")
     for line in summary.as_lines():
         click.echo(f"  {line}")
-
     if audit_recorded:
         click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
     elif not summary.dry_run:
@@ -582,8 +583,12 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
 
     Phase 2a: whether each cube has rules and feeders, which pragmas are set (SKIPCHECK,
     FEEDSTRINGS, UNDEFVALS), and rule/feeder statement counts, into }Meta_Rule_Cube.
+
     Phase 2b: every cross-cube DB() reference in rules and feeders, into
     }Meta_Cube_Rule_Dependency (including references to cubes that do not exist).
+
+    Phase 2c: every literal element name in rules and feeders, resolved to its dimension
+    and flagged ElementExists, into }Meta_Rule_Element_Reference.
 
     Applies the rule exclusion list (control cubes by default). One unreadable cube does
     not abort the run. Records the run into }Meta_Extraction_Audit. Honours dry-run mode.
@@ -633,6 +638,11 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
                             "db_references": summary.db_references,
                             "unresolved_db_references": summary.unresolved_db_references,
                             "dangling_dependencies": summary.dangling_dependencies,
+                            "element_reference_rows": summary.element_reference_rows_written,
+                            "element_references": summary.element_references,
+                            "missing_elements": summary.missing_elements,
+                            "ambiguous_elements": summary.ambiguous_elements,
+                            "unchecked_elements": summary.unchecked_elements,
                         },
                     )
                     audit_recorded = True
@@ -645,7 +655,6 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
     click.echo("Rule extraction complete.")
     for line in summary.as_lines():
         click.echo(f"  {line}")
-
     if audit_recorded:
         click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
     elif not summary.dry_run:
@@ -744,6 +753,7 @@ def diagnose_unresolved(
     click.echo(f"Included processes analysed: {len(process_refs)}")
     click.echo(f"Total unresolved cube references: {report.total}")
     click.echo("")
+
     limit = None if top == 0 else top
     groups = report.top(limit=limit)
     click.echo(f"Top {'all' if limit is None else limit} unresolved target expressions:")
@@ -790,7 +800,6 @@ def export_graph(
 ) -> None:
     """Export an interactive HTML data-flow map (processes, cubes, datasources, chores)."""
     cfg = _load(config_path, environment)
-
     cube_rows: list = []
     chain_rows: list = []
     ds_rows: list = []
@@ -813,7 +822,6 @@ def export_graph(
                         ds_rows.append(d)
                 except Exception as exc:  # noqa: BLE001 - isolate per-process failures
                     click.echo(f"  (skip {name}: {type(exc).__name__})")
-
             # Chores are instance-level: read once, INSIDE the with-block (client open).
             try:
                 chore_rows = ChoreReader(client).read_all()

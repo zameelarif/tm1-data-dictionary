@@ -59,6 +59,14 @@ class RuleReader:
         """Return whether a cube with this name exists."""
         return bool(self._client.service.cubes.exists(name))
 
+    def dimension_names(self, name: str) -> tuple[str, ...]:
+        """Return a cube's dimension names in order, without reading its rules.
+
+        Used in Phase 2c to map DB() arguments to dimensions for cubes that were not
+        read in full (e.g. excluded control cubes referenced from a rule).
+        """
+        return tuple(self._client.service.cubes.get_dimension_names(name))
+
     def read(self, name: str) -> CubeRuleInfo:
         """Return the rule facts for one cube.
 
@@ -69,7 +77,6 @@ class RuleReader:
         }Meta_Rule_Cube).
         """
         cube = self._client.service.cubes.get(name)
-
         if not cube.has_rules:
             return CubeRuleInfo(
                 name=cube.name,
@@ -83,9 +90,7 @@ class RuleReader:
                 feeder_statement_count=0,
                 raw_rule_text="",
             )
-
         rules = cube.rules
-
         return CubeRuleInfo(
             name=cube.name,
             dimension_names=tuple(cube.dimensions),

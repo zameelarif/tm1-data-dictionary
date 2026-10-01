@@ -1,31 +1,35 @@
 """Write extraction-run records into the }Meta_Extraction_Audit cube.
 
-Each extractor execution creates one element in the }Meta_ExtractionRun
-dimension and writes the following measures:
+Each extractor execution creates one element in the }Meta_ExtractionRun dimension and
+writes two kinds of measure:
 
-    ExtractorVersion
-    SchemaVersion
-    StartTime
-    EndTime
-    DurationSeconds
-    ExitStatus
-    RunBy
-    Warnings
+Base measures (every run):
 
-The writer expects the audit cube and its dimensions to have been created by
-the bootstrap command.
+    ExtractorVersion, SchemaVersion, StartTime, EndTime, DurationSeconds,
+    ExitStatus, RunBy, Warnings
 
-For backward compatibility, the writer checks the }Meta_AuditMeasure
-dimension before writing and creates any missing measure elements. This is
-useful when an existing TM1 model was bootstrapped before newer audit
-measures, such as RunBy, were added.
+Run metrics (whatever the command reports):
+
+    Any numeric metric passed to ``record_run(metrics=...)``. The snake_case key becomes
+    a PascalCase measure, e.g. ``processes_total`` -> ``ProcessesTotal`` and
+    ``missing_elements`` -> ``MissingElements``. 'extract' and 'extract-rules' report
+    different metrics; a run simply leaves the other command's metric cells empty.
+
+Self-healing: before writing, any missing measure element (base or metric) is created in
+}Meta_AuditMeasure, so a model bootstrapped before a measure existed keeps working
+without a re-bootstrap. New metrics therefore need no change to this module or the
+schema - add them to the metrics dict in the CLI and they appear on the next run.
+
+The writer expects the audit cube and its dimensions to have been created by the
+bootstrap command.
 
 TM1py objects are imported lazily so unit tests can inject lightweight fakes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -41,7 +45,8 @@ CUBE_EXTRACTION_AUDIT = "}Meta_Extraction_Audit"
 NUMERIC = "Numeric"
 STRING = "String"
 
-AUDIT_MEASURE_TYPES: dict[str, str] = {
+# Measures written on every run, with their TM1 element type.
+BASE_MEASURE_TYPES: dict[str, str] = {
     "ExtractorVersion": STRING,
     "SchemaVersion": STRING,
     "StartTime": STRING,
@@ -50,31 +55,34 @@ AUDIT_MEASURE_TYPES: dict[str, str] = {
     "ExitStatus": STRING,
     "RunBy": STRING,
     "Warnings": STRING,
-    # --- run metrics (added; auto-created by the self-healing writer) ---
-    "ProcessesTotal": NUMERIC,
-    "ProcessesIncluded": NUMERIC,
-    "ProcessesExcluded": NUMERIC,
-    "ProcessesFailed": NUMERIC,
-    "CubeRows": NUMERIC,
-    "ChainRows": NUMERIC,
-    "DatasourceRows": NUMERIC,
-    "ChoreRows": NUMERIC,
-    "DimensionRows": NUMERIC,
-    "UnresolvedCubeRefs": NUMERIC,
-    "UnresolvedChainRefs": NUMERIC,
-    "UnresolvedDimRefs": NUMERIC,
 }
+
+# A metric key must be snake_case: lowercase letters, digits and underscores.
+_METRIC_KEY = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
+
+def metric_measure_name(key: str) -> str:
+    """Return the audit measure name for a snake_case metric key.
+
+    ``processes_total`` -> ``ProcessesTotal``; ``db_references`` -> ``DbReferences``.
+    Raises ValueError for a key that is not snake_case or that would clash with a base
+    measure (e.g. ``run_by``).
+    """
+    if not _METRIC_KEY.match(key):
+        raise ValueError(f"Audit metric key must be snake_case, got {key!r}.")
+    name = "".join(part.capitalize() for part in key.split("_"))
+    if name in BASE_MEASURE_TYPES:
+        raise ValueError(f"Audit metric {key!r} clashes with base measure {name!r}.")
+    return name
 
 
 def _utc_now() -> datetime:
     """Return the current time in UTC."""
-
     return datetime.now(UTC)
 
 
 def _load_element_class() -> Any:
     """Return the TM1py Element class using a lazy import."""
-
     from TM1py.Objects import Element  # noqa: PLC0415
 
     return Element
@@ -83,14 +91,19 @@ def _load_element_class() -> Any:
 def _as_utc(value: datetime) -> datetime:
     """Return a timezone-aware UTC datetime.
 
-    A naive datetime is treated as UTC. This keeps the writer tolerant of
-    callers and tests that provide a datetime without timezone information.
+    A naive datetime is treated as UTC. This keeps the writer tolerant of callers and
+    tests that provide a datetime without timezone information.
     """
-
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
-
     return value.astimezone(UTC)
+
+
+def _numeric(key: str, value: object) -> int | float:
+    """Return a metric value as a number, rejecting bools and non-numeric values."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Audit metric {key!r} must be numeric, got {value!r}.")
+    return value
 
 
 @dataclass(frozen=True)
@@ -106,22 +119,10 @@ class AuditRecord:
     exit_status: str
     run_by: str = ""
     warnings: str = ""
-    processes_total: int = 0
-    processes_included: int = 0
-    processes_excluded: int = 0
-    processes_failed: int = 0
-    cube_rows: int = 0
-    chain_rows: int = 0
-    datasource_rows: int = 0
-    chore_rows: int = 0
-    dimension_rows: int = 0
-    unresolved_cube_refs: int = 0
-    unresolved_chain_refs: int = 0
-    unresolved_dim_refs: int = 0
+    metrics: Mapping[str, int | float] = field(default_factory=dict)
 
-    def as_cells(self) -> dict[str, object]:
-        """Return audit measure names and their cell values."""
-
+    def base_cells(self) -> dict[str, object]:
+        """Return the base measures and their cell values."""
         return {
             "ExtractorVersion": self.extractor_version,
             "SchemaVersion": self.schema_version,
@@ -131,19 +132,23 @@ class AuditRecord:
             "ExitStatus": self.exit_status,
             "RunBy": self.run_by,
             "Warnings": self.warnings,
-            "ProcessesTotal": self.processes_total,
-            "ProcessesIncluded": self.processes_included,
-            "ProcessesExcluded": self.processes_excluded,
-            "ProcessesFailed": self.processes_failed,
-            "CubeRows": self.cube_rows,
-            "ChainRows": self.chain_rows,
-            "DatasourceRows": self.datasource_rows,
-            "ChoreRows": self.chore_rows,
-            "DimensionRows": self.dimension_rows,
-            "UnresolvedCubeRefs": self.unresolved_cube_refs,
-            "UnresolvedChainRefs": self.unresolved_chain_refs,
-            "UnresolvedDimRefs": self.unresolved_dim_refs,
         }
+
+    def metric_cells(self) -> dict[str, object]:
+        """Return the run-metric measures and their cell values."""
+        return {
+            metric_measure_name(key): _numeric(key, value) for key, value in self.metrics.items()
+        }
+
+    def as_cells(self) -> dict[str, object]:
+        """Return every measure name (base and metric) and its cell value."""
+        return {**self.base_cells(), **self.metric_cells()}
+
+    def measure_types(self) -> dict[str, str]:
+        """Return every measure this record writes, with its TM1 element type."""
+        types = dict(BASE_MEASURE_TYPES)
+        types.update({name: NUMERIC for name in self.metric_cells()})
+        return types
 
 
 @dataclass
@@ -155,46 +160,32 @@ class AuditWriter:
 
     def new_run_id(self, timestamp: datetime | None = None) -> str:
         """Return an ISO-8601 UTC identifier for an extraction run."""
-
         run_time = _as_utc(timestamp if timestamp is not None else self.clock())
         return run_time.strftime(_ISO_FORMAT)
 
     def _cube_exists(self) -> bool:
         """Return whether the audit cube exists."""
-
-        service = self.client.service
-        cubes = getattr(service, "cubes", None)
-
+        cubes = getattr(self.client.service, "cubes", None)
         if cubes is None or not hasattr(cubes, "exists"):
             return True
-
         return bool(cubes.exists(CUBE_EXTRACTION_AUDIT))
 
     def _dimension_exists(self, dimension_name: str) -> bool:
         """Return whether a dimension exists."""
-
-        service = self.client.service
-        dimensions = getattr(service, "dimensions", None)
-
+        dimensions = getattr(self.client.service, "dimensions", None)
         if dimensions is None or not hasattr(dimensions, "exists"):
             return True
-
         return bool(dimensions.exists(dimension_name))
 
     def _require_audit_schema(self) -> None:
         """Raise a clear error when the base audit schema is missing."""
-
         missing: list[str] = []
-
         if not self._cube_exists():
             missing.append(f"cube {CUBE_EXTRACTION_AUDIT}")
-
         if not self._dimension_exists(DIM_EXTRACTION_RUN):
             missing.append(f"dimension {DIM_EXTRACTION_RUN}")
-
         if not self._dimension_exists(DIM_AUDIT_MEASURE):
             missing.append(f"dimension {DIM_AUDIT_MEASURE}")
-
         if missing:
             missing_text = ", ".join(missing)
             raise RuntimeError(
@@ -204,25 +195,13 @@ class AuditWriter:
 
     def _element_exists(self, dimension_name: str, element_name: str) -> bool:
         """Return whether an element exists in a dimension's default hierarchy."""
-
         return bool(
-            self.client.service.elements.exists(
-                dimension_name,
-                dimension_name,
-                element_name,
-            )
+            self.client.service.elements.exists(dimension_name, dimension_name, element_name)
         )
 
-    def _create_element(
-        self,
-        dimension_name: str,
-        element_name: str,
-        element_type: str,
-    ) -> None:
+    def _create_element(self, dimension_name: str, element_name: str, element_type: str) -> None:
         """Create one element in a dimension's default hierarchy."""
-
         element_class = _load_element_class()
-
         self.client.service.elements.create(
             dimension_name,
             dimension_name,
@@ -231,42 +210,25 @@ class AuditWriter:
 
     def _ensure_run_element(self, run_id: str) -> None:
         """Create the extraction-run element when it does not exist."""
-
         if not self._element_exists(DIM_EXTRACTION_RUN, run_id):
-            self._create_element(
-                DIM_EXTRACTION_RUN,
-                run_id,
-                NUMERIC,
-            )
+            self._create_element(DIM_EXTRACTION_RUN, run_id, NUMERIC)
 
-    def _ensure_audit_measure_elements(self) -> None:
-        """Create audit measures missing from an older audit schema.
-
-        This supports models bootstrapped before newer measures, such as
-        RunBy, were introduced.
-        """
-
-        for measure_name, element_type in AUDIT_MEASURE_TYPES.items():
+    def _ensure_measure_elements(self, measure_types: Mapping[str, str]) -> None:
+        """Create any measure this record writes that }Meta_AuditMeasure lacks."""
+        for measure_name, element_type in measure_types.items():
             if not self._element_exists(DIM_AUDIT_MEASURE, measure_name):
-                self._create_element(
-                    DIM_AUDIT_MEASURE,
-                    measure_name,
-                    element_type,
-                )
+                self._create_element(DIM_AUDIT_MEASURE, measure_name, element_type)
 
     def write(self, record: AuditRecord) -> None:
         """Write one audit record to }Meta_Extraction_Audit."""
-
         self.client.ensure_writable("write audit record")
+        # Validate metrics before touching TM1, so a bad key never half-writes a run.
+        cells = record.as_cells()
         self._require_audit_schema()
-        self._ensure_audit_measure_elements()
+        self._ensure_measure_elements(record.measure_types())
         self._ensure_run_element(record.run_id)
 
-        cellset = {
-            (record.run_id, measure_name): value
-            for measure_name, value in record.as_cells().items()
-        }
-
+        cellset = {(record.run_id, measure_name): value for measure_name, value in cells.items()}
         try:
             self.client.service.cells.write(
                 cube_name=CUBE_EXTRACTION_AUDIT,
@@ -287,16 +249,16 @@ class AuditWriter:
         exit_status: str = "Success",
         run_by: str = "",
         warnings: str = "",
-        metrics: dict[str, int] | None = None,
+        metrics: Mapping[str, int | float] | None = None,
     ) -> AuditRecord:
-        """Create, write, and return a completed extraction audit record."""
+        """Create, write, and return a completed extraction audit record.
 
+        Every key in ``metrics`` is written as its own measure (see module docstring).
+        """
         start_dt = _as_utc(start_time)
         end_dt = _as_utc(self.clock())
-
         duration_seconds = max(0.0, (end_dt - start_dt).total_seconds())
 
-        m = metrics or {}
         record = AuditRecord(
             run_id=self.new_run_id(end_dt),
             extractor_version=str(extractor_version),
@@ -307,19 +269,7 @@ class AuditWriter:
             exit_status=str(exit_status),
             run_by=str(run_by),
             warnings=str(warnings),
-            processes_total=int(m.get("processes_total", 0)),
-            processes_included=int(m.get("processes_included", 0)),
-            processes_excluded=int(m.get("processes_excluded", 0)),
-            processes_failed=int(m.get("processes_failed", 0)),
-            cube_rows=int(m.get("cube_rows", 0)),
-            chain_rows=int(m.get("chain_rows", 0)),
-            datasource_rows=int(m.get("datasource_rows", 0)),
-            chore_rows=int(m.get("chore_rows", 0)),
-            dimension_rows=int(m.get("dimension_rows", 0)),
-            unresolved_cube_refs=int(m.get("unresolved_cube_refs", 0)),
-            unresolved_chain_refs=int(m.get("unresolved_chain_refs", 0)),
-            unresolved_dim_refs=int(m.get("unresolved_dim_refs", 0)),
+            metrics=dict(metrics or {}),
         )
-
         self.write(record)
         return record

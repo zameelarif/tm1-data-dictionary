@@ -1,4 +1,9 @@
-"""Unit tests for the }Meta_Process_Datasource writer."""
+"""Unit tests for the }Meta_Process_Datasource writer.
+
+Cube shape: }Meta_Process x }Meta_SourceType x }Meta_Datasource x }Meta_DatasourceMeasure,
+so cells are keyed (process, source type, source name, measure). SourceType is a seeded
+dimension, not a measure.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ from tm1_data_dictionary.config import (
     RunConfig,
 )
 from tm1_data_dictionary.parser.datasource_rollup import DatasourceRow
-from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
+from tm1_data_dictionary.tm1_client import TM1Client
 from tm1_data_dictionary.writers.process_datasource_writer import write_datasource_lineage
 
 
@@ -92,9 +97,16 @@ def test_writes_cells_and_creates_elements(fake_tm1py_element: None) -> None:
     assert len(service.cells.writes) == 1
     cube, cellset = service.cells.writes[0]
     assert cube == "}Meta_Process_Datasource"
-    key = ("Cube.GL.Load", r"C:\data\gl.csv")
-    assert cellset[(*key, "SourceType")] == "File"
+    key = ("Cube.GL.Load", "File", r"C:\data\gl.csv")
+    assert cellset[(*key, "Count")] == 1
     assert cellset[(*key, "Detail")] == ""
+
+
+def test_source_type_elements_are_not_created(fake_tm1py_element: None) -> None:
+    # SourceType elements are seeded by bootstrap, so the writer never creates them.
+    service = _FakeService()
+    write_datasource_lineage(_client(service), [_row()])
+    assert all(dim != "}Meta_SourceType" for dim, _ in service.elements.created)
 
 
 def test_odbc_detail_written(fake_tm1py_element: None) -> None:
@@ -102,8 +114,15 @@ def test_odbc_detail_written(fake_tm1py_element: None) -> None:
     rows = [_row(process="P", source="MyDSN", stype="ODBC", detail="SELECT 1")]
     write_datasource_lineage(_client(service), rows)
     _cube, cellset = service.cells.writes[0]
-    assert cellset[("P", "MyDSN", "SourceType")] == "ODBC"
-    assert cellset[("P", "MyDSN", "Detail")] == "SELECT 1"
+    assert cellset[("P", "ODBC", "MyDSN", "Count")] == 1
+    assert cellset[("P", "ODBC", "MyDSN", "Detail")] == "SELECT 1"
+
+
+def test_unknown_source_type_falls_back_to_other(fake_tm1py_element: None) -> None:
+    service = _FakeService()
+    write_datasource_lineage(_client(service), [_row(stype="SAP")])
+    _cube, cellset = service.cells.writes[0]
+    assert cellset[("P", "Other", "gl.csv", "Count")] == 1
 
 
 def test_existing_elements_not_recreated(fake_tm1py_element: None) -> None:
@@ -113,10 +132,10 @@ def test_existing_elements_not_recreated(fake_tm1py_element: None) -> None:
     assert ("}Meta_Datasource", "gl.csv") not in service.elements.created
 
 
-def test_dry_run_blocks_write(fake_tm1py_element: None) -> None:
+def test_dry_run_writes_nothing(fake_tm1py_element: None) -> None:
+    # Dry-run returns the row count that would be written, without touching TM1.
     service = _FakeService()
-    with pytest.raises(TM1ClientError, match="dry-run"):
-        write_datasource_lineage(_client(service, dry_run=True), [_row()])
+    assert write_datasource_lineage(_client(service, dry_run=True), [_row()]) == 1
     assert service.cells.writes == []
     assert service.elements.created == []
 
@@ -130,5 +149,4 @@ def test_shared_source_deduplicated(fake_tm1py_element: None) -> None:
     ]
     assert write_datasource_lineage(_client(service), rows) == 2
     created = service.elements.created
-    # shared.csv created once (dedup via existing set).
     assert created.count(("}Meta_Datasource", "shared.csv")) == 1
