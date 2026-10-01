@@ -40,6 +40,7 @@ from tm1_data_dictionary.schema import (
     process_dimension_schema,
     process_function_schema,
     rule_cube_schema,
+    rule_dependency_schema,
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
@@ -47,7 +48,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 
 
 # --------------------------------------------------------------------------- #
@@ -165,10 +166,11 @@ def bootstrap(config_path: str, environment: str | None) -> None:
             r7 = ensure_schema(client, unresolved_reference_schema())
             r8 = ensure_schema(client, process_function_schema())
             r9 = ensure_schema(client, rule_cube_schema())
+            r10 = ensure_schema(client, rule_dependency_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5, r6, r7, r8, r9)
+    results = (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
@@ -573,10 +575,13 @@ def extract(
     help="Suppress per-cube progress lines (show only the summary).",
 )
 def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) -> None:
-    """Extract cube-level rule facts (Phase 2a) for EVERY cube.
+    """Extract rule facts for EVERY cube.
 
-    Records whether each cube has rules and feeders, which pragmas are set (SKIPCHECK,
-    FEEDSTRINGS, UNDEFVALS), and rule/feeder statement counts into }Meta_Rule_Cube.
+    Phase 2a: whether each cube has rules and feeders, which pragmas are set (SKIPCHECK,
+    FEEDSTRINGS, UNDEFVALS), and rule/feeder statement counts, into }Meta_Rule_Cube.
+    Phase 2b: every cross-cube DB() reference in rules and feeders, into
+    }Meta_Cube_Rule_Dependency (including references to cubes that do not exist).
+
     Applies the rule exclusion list (control cubes by default). One unreadable cube does
     not abort the run. Records the run into }Meta_Extraction_Audit. Honours dry-run mode.
 
@@ -621,6 +626,10 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
                             "cubes_with_rules": summary.cubes_with_rules,
                             "cubes_with_feeders": summary.cubes_with_feeders,
                             "cubes_with_skipcheck": summary.cubes_with_skipcheck,
+                            "rule_dependency_rows": summary.rule_dependency_rows_written,
+                            "db_references": summary.db_references,
+                            "unresolved_db_references": summary.unresolved_db_references,
+                            "dangling_dependencies": summary.dangling_dependencies,
                         },
                     )
                     audit_recorded = True

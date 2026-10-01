@@ -113,6 +113,12 @@ CUBE_PROCESS_FUNCTION = "}Meta_Process_Function"
 DIM_RULE_CUBE_MEASURE = "}Meta_RuleCubeMeasure"
 CUBE_RULE_CUBE = "}Meta_Rule_Cube"
 
+# --- }Meta_Cube_Rule_Dependency (Phase 2b - rules) ---
+DIM_RULE_RELATED_CUBE = "}Meta_Rule_RelatedCube"
+DIM_RULE_DEPENDENCY_TYPE = "}Meta_RuleDependencyType"
+DIM_RULE_DEPENDENCY_MEASURE = "}Meta_RuleDependencyMeasure"
+CUBE_RULE_DEPENDENCY = "}Meta_Cube_Rule_Dependency"
+
 
 # --------------------------------------------------------------------------- #
 # Seed element + role / measure element sets
@@ -210,6 +216,21 @@ RULE_CUBE_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("RuleStatementCount", NUMERIC),  # statements before FEEDERS;
     ElementDef("FeederStatementCount", NUMERIC),  # statements after FEEDERS;
     ElementDef("DimensionCount", NUMERIC),  # number of dimensions on the cube
+)
+
+# How the owning cube relates to the referenced cube in }Meta_Cube_Rule_Dependency.
+RULE_DEPENDENCY_TYPE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("RuleRead", STRING),  # rule statement reads the related cube via DB()
+    ElementDef("FeederTarget", STRING),  # feeder feeds into the related cube via DB()
+    ElementDef("FeederLookup", STRING),  # DB() used inside a feeder to look something up
+)
+
+# Measures for }Meta_Cube_Rule_Dependency (one row per cube / related cube / type).
+RULE_DEPENDENCY_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # how many DB() references were rolled into this row
+    ElementDef("FirstLine", NUMERIC),  # rule-text line of the first reference
+    ElementDef("FirstStatement", STRING),  # first referencing statement (truncated)
+    ElementDef("RelatedCubeExists", STRING),  # Yes | No - No means a dangling reference
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -414,5 +435,31 @@ def rule_cube_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(cube_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def rule_dependency_schema() -> SchemaDef:
+    """Return the schema for }Meta_Cube_Rule_Dependency and its dimensions (Phase 2b).
+
+    Dimensioned }Meta_Cube x }Meta_Rule_RelatedCube x }Meta_RuleDependencyType x
+    }Meta_RuleDependencyMeasure.
+
+    Records every cross-cube DB() reference in a cube's rules and feeders. }Meta_Cube is
+    the cube that owns the rule; }Meta_Rule_RelatedCube is the cube it references (a
+    second cube-name dimension, because TM1 needs distinct names to relate cubes to
+    cubes - the same pattern as }Meta_Process_Callee). }Meta_RuleDependencyType says
+    whether the rule reads from, feeds into, or looks up the related cube.
+    """
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    related_dim = DimensionDef(DIM_RULE_RELATED_CUBE, (SEED_ELEMENT,))
+    type_dim = DimensionDef(DIM_RULE_DEPENDENCY_TYPE, RULE_DEPENDENCY_TYPE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_RULE_DEPENDENCY_MEASURE, RULE_DEPENDENCY_MEASURES)
+    cube = CubeDef(
+        CUBE_RULE_DEPENDENCY,
+        (DIM_CUBE, DIM_RULE_RELATED_CUBE, DIM_RULE_DEPENDENCY_TYPE, DIM_RULE_DEPENDENCY_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(cube_dim, related_dim, type_dim, measure_dim),
         cubes=(cube,),
     )
