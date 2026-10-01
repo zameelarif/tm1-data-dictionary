@@ -244,3 +244,89 @@ def test_index_isolates_failures() -> None:
     assert not index.available("Secret")
     assert index.lookup("Secret", "x") is None
     assert "Secret" in index.failed_dimensions
+
+
+# --------------------------------------------------------------------------- #
+# Unqualified lookups and the TM1 fallback
+# --------------------------------------------------------------------------- #
+
+
+class _CountingIndex:
+    """Index fake: bulk names per dimension, plus a fallback that counts queries."""
+
+    def __init__(self, bulk: dict[str, set[str]], fallback: dict[tuple[str, str], str]):
+        self._bulk = bulk
+        self._fallback = fallback
+        self.queries: list[tuple[str, str]] = []
+
+    def available(self, dimension: str) -> bool:
+        return True
+
+    def lookup(self, dimension: str, element: str, *, fallback: bool = True) -> str | None:
+        if element in self._bulk.get(dimension, set()):
+            return element
+        if not fallback:
+            return None
+        self.queries.append((dimension, element))
+        return self._fallback.get((dimension, element))
+
+
+def _resolve(index: _CountingIndex, text: str, cube_dims: tuple[str, ...]):  # noqa: ANN202
+    refs = extract_element_references("C", parse_rule_text(text))
+    return rollup_element_references(refs, {"C": cube_dims}, index)
+
+
+def test_bulk_hit_costs_no_fallback_queries() -> None:
+    index = _CountingIndex({"Account": {"Salaries"}}, {})
+    _resolve(index, "['Salaries'] = 1;", ("Version", "Account", "Measure"))
+    assert index.queries == []
+
+
+def test_fallback_finds_alias_missed_by_bulk_read() -> None:
+    index = _CountingIndex({}, {("Version", "Actual"): "1"})
+    rollup = _resolve(index, "['Actual'] = 1;", ("Version", "Account"))
+    row = rollup.rows[0]
+    assert (row.dimension, row.element, row.element_exists) == ("Version", "1", EXISTS_YES)
+    assert row.written_as == "Actual"
+
+
+def test_dimension_qualified_item_uses_fallback_directly() -> None:
+    index = _CountingIndex({}, {("Version", "Actual"): "1"})
+    rollup = _resolve(index, "['Version':'Actual'] = 1;", ("Version", "Account"))
+    assert rollup.rows[0].element == "1"
+    assert index.queries == [("Version", "Actual")]
+
+
+# --------------------------------------------------------------------------- #
+# Real-world case: Retail feeder into a General Ledger account that does not exist
+# --------------------------------------------------------------------------- #
+
+
+def test_retail_freight_feeder_targets_missing_account() -> None:
+    text = (
+        "FEEDERS;\n"
+        "['Local','Sales Amount']=>\n"
+        "  DB('General Ledger', !Version, !Year, !Period, !Currency, !Region, "
+        "'Sales and Marketing', '5020', 'Amount');\n"
+        "['Local','Freight']=>\n"
+        "  DB('General Ledger', !Version, !Year, !Period, !Currency, !Region, "
+        "'Sales and Marketing', 'Freight', 'Amount');\n"
+    )
+    ELEMENTS["Account"].append("5020")
+    try:
+        retail = ("Version", "Year", "Period", "Currency", "Region", "Retail Measure")
+        cubes = {"Retail": retail, "General Ledger": GL_DIMS}
+        ELEMENTS["Retail Measure"] = ["Sales Amount", "Freight"]
+        rollup = _rows("Retail", text, cubes)
+    finally:
+        ELEMENTS["Account"].remove("5020")
+        del ELEMENTS["Retail Measure"]
+    freight = [
+        r
+        for r in rollup.rows
+        if r.element == "Freight" and r.reference_type == ReferenceType.FEEDER_TARGET
+    ][0]
+    assert (freight.dimension, freight.element_exists) == ("Account", EXISTS_NO)
+    assert freight.target_cubes == ["General Ledger"]
+    assert _find(rollup, "5020", ReferenceType.FEEDER_TARGET)[0].element_exists == EXISTS_YES
+    assert _find(rollup, "Freight", ReferenceType.FEEDER_SOURCE)[0].dimension == "Retail Measure"

@@ -125,6 +125,10 @@ DIM_RULE_ELEMENT_REF_TYPE = "}Meta_RuleElementRefType"
 DIM_RULE_ELEMENT_REF_MEASURE = "}Meta_RuleElementRefMeasure"
 CUBE_RULE_ELEMENT_REFERENCE = "}Meta_Rule_Element_Reference"
 
+# --- }Meta_Rule_Function (Phase 2d - rules) ---
+DIM_RULE_FUNCTION_MEASURE = "}Meta_RuleFunctionMeasure"
+CUBE_RULE_FUNCTION = "}Meta_Rule_Function"
+
 
 # --------------------------------------------------------------------------- #
 # Seed element + role / measure element sets
@@ -259,6 +263,17 @@ RULE_ELEMENT_REF_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Candidates", STRING),  # candidate dimensions when ambiguous
     ElementDef("TargetCubes", STRING),  # cube(s) whose dimension holds the element
     ElementDef("WrittenAs", STRING),  # element as written in the rule (alias / case)
+)
+
+# Measures for }Meta_Rule_Function (one row per cube/function).
+RULE_FUNCTION_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # total uses in rules and feeders
+    ElementDef("RuleCount", NUMERIC),  # uses in rule statements
+    ElementDef("FeederCount", NUMERIC),  # uses in feeder statements
+    ElementDef("Category", STRING),  # Lookup | Attribute | Hierarchy | Logic | ...
+    ElementDef("FirstLine", NUMERIC),  # rule-text line of the first statement using it
+    ElementDef("FirstStatement", STRING),  # that statement (truncated)
+    ElementDef("Lines", STRING),  # every statement line using it, comma-separated
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -525,5 +540,27 @@ def rule_element_reference_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(cube_dim, dimension_dim, element_dim, type_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def rule_function_schema() -> SchemaDef:
+    """Return the schema for }Meta_Rule_Function and its measure dimension (Phase 2d).
+
+    Dimensioned }Meta_Cube x }Meta_Function x }Meta_RuleFunctionMeasure.
+
+    Records every function and keyword (STET, CONTINUE, ISLEAF) used in each cube's
+    rules and feeders, one row per (cube, function). }Meta_Function is shared with
+    }Meta_Process_Function, so TI and rule usage of the same function line up.
+    """
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    function_dim = DimensionDef(DIM_FUNCTION, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_RULE_FUNCTION_MEASURE, RULE_FUNCTION_MEASURES)
+    cube = CubeDef(
+        CUBE_RULE_FUNCTION,
+        (DIM_CUBE, DIM_FUNCTION, DIM_RULE_FUNCTION_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(cube_dim, function_dim, measure_dim),
         cubes=(cube,),
     )

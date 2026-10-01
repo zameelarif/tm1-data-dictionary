@@ -42,6 +42,7 @@ from tm1_data_dictionary.schema import (
     rule_cube_schema,
     rule_dependency_schema,
     rule_element_reference_schema,
+    rule_function_schema,
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
@@ -49,7 +50,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +170,7 @@ def bootstrap(config_path: str, environment: str | None) -> None:
         rule_cube_schema(),
         rule_dependency_schema(),
         rule_element_reference_schema(),
+        rule_function_schema(),
     )
     try:
         with TM1Client(cfg) as client:
@@ -590,6 +592,9 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
     Phase 2c: every literal element name in rules and feeders, resolved to its dimension
     and flagged ElementExists, into }Meta_Rule_Element_Reference.
 
+    Phase 2d: every function and keyword (STET, CONTINUE, ISLEAF) used in rules and
+    feeders, with a category, into }Meta_Rule_Function.
+
     Applies the rule exclusion list (control cubes by default). One unreadable cube does
     not abort the run. Records the run into }Meta_Extraction_Audit. Honours dry-run mode.
 
@@ -643,6 +648,13 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
                             "missing_elements": summary.missing_elements,
                             "ambiguous_elements": summary.ambiguous_elements,
                             "unchecked_elements": summary.unchecked_elements,
+                            "elements_resolved_by_tm1": summary.resolved_by_tm1,
+                            "rule_function_rows": summary.rule_function_rows_written,
+                            "function_uses": summary.function_uses,
+                            "distinct_functions": summary.distinct_functions,
+                            "cubes_using_hierarchy_functions": (
+                                summary.cubes_using_hierarchy_functions
+                            ),
                         },
                     )
                     audit_recorded = True

@@ -19,9 +19,10 @@ Extraction (:func:`extract_element_references`) is pure text work. Resolution
 
 - ``DB()`` arguments: by position, using the referenced cube's dimension order.
 - ``'Dim':'Element'`` area items and ``!Dim`` comparisons: the named dimension.
-- Plain area / ``[...]`` items: looked up in every dimension of the cube. Exactly one
-  match gives the dimension; more than one is flagged **ambiguous** rather than guessed;
-  none means the element does not exist.
+- Plain area / ``[...]`` items: looked up in every dimension of the cube (names and
+  aliases first, then TM1 itself if nothing matched). Exactly one match gives the
+  dimension; more than one is flagged **ambiguous** rather than guessed; none means the
+  element does not exist.
 
 Only plain string literals are recorded. Arguments that are expressions (``!Version``,
 ``ATTRS(...)``, nested ``DB(...)``) are skipped - the same "never guess" principle as
@@ -315,8 +316,11 @@ class ElementLookup(Protocol):
         """Return whether the dimension's elements could be read."""
         ...
 
-    def lookup(self, dimension: str, element: str) -> str | None:
-        """Return the principal element name (matching aliases too), or None."""
+    def lookup(self, dimension: str, element: str, *, fallback: bool = True) -> str | None:
+        """Return the principal element name (matching aliases too), or None.
+
+        ``fallback=False`` means "cached names and aliases only, no extra TM1 query".
+        """
         ...
 
 
@@ -393,11 +397,16 @@ def resolve_reference(
         dimension = next((d for d in dims if _normalise(d) == hint), ref.dimension_hint)
         return _check(index, dimension, ref.element)
 
+    # Unqualified element: check every dimension's cached names and aliases first, and
+    # only ask TM1 (the slower fallback) when nothing matched anywhere.
     matches: list[tuple[str, str]] = []
-    for dimension in dims:
-        principal = index.lookup(dimension, ref.element)
-        if principal is not None:
-            matches.append((dimension, principal))
+    for use_fallback in (False, True):
+        for dimension in dims:
+            principal = index.lookup(dimension, ref.element, fallback=use_fallback)
+            if principal is not None:
+                matches.append((dimension, principal))
+        if matches:
+            break
     if len(matches) == 1:
         dimension, principal = matches[0]
         return dimension, principal, EXISTS_YES, ""

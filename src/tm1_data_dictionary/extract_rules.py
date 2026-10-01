@@ -6,8 +6,9 @@ and rolled up into every rule fact:
 - Phase 2a - cube-level facts (rules? feeders? pragmas?) into }Meta_Rule_Cube.
 - Phase 2b - cross-cube DB() dependencies into }Meta_Cube_Rule_Dependency.
 - Phase 2c - literal element references into }Meta_Rule_Element_Reference.
+- Phase 2d - function and keyword usage into }Meta_Rule_Function.
 
-Later phases (function usage, feeder gaps) extend this orchestrator the same way,
+Later phases (feeder gaps) extend this orchestrator the same way,
 reusing the same parsed rule text.
 
 Design principles (unchanged from the TI orchestrator):
@@ -26,7 +27,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from tm1_data_dictionary.element_index import ElementIndex, tm1_element_loader
+from tm1_data_dictionary.element_index import (
+    ElementIndex,
+    tm1_element_loader,
+    tm1_element_resolver,
+)
 from tm1_data_dictionary.parser.rules.rule_dependencies import (
     RuleDependency,
     extract_dependencies,
@@ -36,6 +41,12 @@ from tm1_data_dictionary.parser.rules.rule_element_references import (
     ElementReference,
     extract_element_references,
     rollup_element_references,
+)
+from tm1_data_dictionary.parser.rules.rule_functions import (
+    CAT_HIERARCHY,
+    RuleFunctionCall,
+    extract_function_calls,
+    rollup_function_calls,
 )
 from tm1_data_dictionary.parser.rules.rule_text import parse_rule_text
 from tm1_data_dictionary.rule_exclusions import RuleExclusionRules, partition
@@ -52,6 +63,10 @@ from tm1_data_dictionary.writers.rule_dependency_writer import (
 from tm1_data_dictionary.writers.rule_element_reference_writer import (
     clear_rule_element_reference,
     write_rule_element_references,
+)
+from tm1_data_dictionary.writers.rule_function_writer import (
+    clear_rule_function,
+    write_rule_functions,
 )
 
 # A progress callback receives:
@@ -71,6 +86,7 @@ class RuleExtractionSummary:
     rule_cube_rows_written: int = 0
     rule_dependency_rows_written: int = 0
     element_reference_rows_written: int = 0
+    rule_function_rows_written: int = 0
     cubes_with_rules: int = 0
     cubes_with_feeders: int = 0
     cubes_with_skipcheck: int = 0
@@ -83,9 +99,15 @@ class RuleExtractionSummary:
     ambiguous_elements: int = 0  # rows whose element is in more than one dimension
     unchecked_elements: int = 0  # rows with ElementExists = Unknown
     dimensions_read: int = 0
+    function_uses: int = 0  # every function/keyword use in rules and feeders
+    distinct_functions: int = 0
+    cubes_using_hierarchy_functions: int = 0
+    resolved_by_tm1: int = 0  # elements found only by asking TM1 (MDX fallback)
+    fallback_limit_reached: bool = False
     excluded_names: list[str] = field(default_factory=list)
     failed_names: list[tuple[str, str]] = field(default_factory=list)
     failed_dimensions: dict[str, str] = field(default_factory=dict)
+    alias_errors: dict[str, list[str]] = field(default_factory=dict)
     dry_run: bool = False
 
     def as_lines(self) -> list[str]:
@@ -101,6 +123,7 @@ class RuleExtractionSummary:
             f"Rule-cube rows: {self.rule_cube_rows_written}{written_suffix}",
             f"Rule-dependency rows: {self.rule_dependency_rows_written}{written_suffix}",
             f"Element-reference rows: {self.element_reference_rows_written}{written_suffix}",
+            f"Rule-function rows: {self.rule_function_rows_written}{written_suffix}",
             f"Cubes with rules: {self.cubes_with_rules}",
             f"Cubes with feeders: {self.cubes_with_feeders}",
             f"Cubes with SKIPCHECK: {self.cubes_with_skipcheck}",
@@ -112,12 +135,27 @@ class RuleExtractionSummary:
             f"Element rows - ambiguous dimension: {self.ambiguous_elements}",
             f"Element rows - not checked: {self.unchecked_elements}",
             f"Dimensions read for element checks: {self.dimensions_read}",
+            f"Elements resolved by TM1 lookup (alias fallback): {self.resolved_by_tm1}",
+            (
+                f"Function uses: {self.function_uses} "
+                f"({self.distinct_functions} distinct functions)"
+            ),
+            f"Cubes using hierarchy functions: {self.cubes_using_hierarchy_functions}",
         ]
+        if self.fallback_limit_reached:
+            lines.append(
+                "TM1 lookup limit reached - some elements were not double-checked "
+                "and may be falsely reported missing"
+            )
         if self.malformed_statements:
             lines.append(f"Malformed statements: {self.malformed_statements}")
         if self.failed_dimensions:
             lines.append("Dimensions not readable:")
             lines.extend(f"  {name}: {error}" for name, error in self.failed_dimensions.items())
+        if self.alias_errors:
+            lines.append("Aliases not readable (elements may be falsely reported missing):")
+            for name, errors in self.alias_errors.items():
+                lines.extend(f"  {name} - {error}" for error in errors)
         if self.failed_names:
             lines.append("Failures:")
             lines.extend(f"  {name}: {error}" for name, error in self.failed_names)
@@ -169,7 +207,7 @@ def extract_all_rules(
     """
     rules = rules or RuleExclusionRules.default()
     reader = RuleReader(client)
-    index = element_index or ElementIndex(tm1_element_loader(client))
+    index = element_index or ElementIndex(tm1_element_loader(client), tm1_element_resolver(client))
     summary = RuleExtractionSummary(dry_run=client.dry_run)
 
     all_cube_names = reader.list_cube_names()
@@ -184,10 +222,12 @@ def extract_all_rules(
         clear_rule_cube(client)
         clear_rule_dependency(client)
         clear_rule_element_reference(client)
+        clear_rule_function(client)
 
     cube_rows: list[CubeRuleInfo] = []
     all_dependencies: list[RuleDependency] = []
     all_element_refs: list[ElementReference] = []
+    all_function_calls: list[RuleFunctionCall] = []
     total_included = len(partition_result.included)
 
     for index_no, cube_name in enumerate(partition_result.included, start=1):
@@ -206,11 +246,14 @@ def extract_all_rules(
                 element_refs = extract_element_references(info.name, parsed)
                 all_dependencies.extend(dependencies)
                 all_element_refs.extend(element_refs)
+                function_calls = extract_function_calls(info.name, parsed)
+                all_function_calls.extend(function_calls)
                 summary.malformed_statements += parsed.malformed_count
                 status = (
                     f"has rules, {info.rule_statement_count} rule stmt, "
                     f"{info.feeder_statement_count} feeder stmt, "
-                    f"{len(dependencies)} DB ref, {len(element_refs)} element ref"
+                    f"{len(dependencies)} DB ref, {len(element_refs)} element ref, "
+                    f"{len(function_calls)} function use"
                 )
                 if info.skipcheck:
                     status += ", SKIPCHECK"
@@ -240,14 +283,27 @@ def extract_all_rules(
     summary.unchecked_elements = element_rollup.unknown_count
     summary.dimensions_read = index.dimensions_loaded
     summary.failed_dimensions = index.failed_dimensions
+    summary.alias_errors = index.alias_errors
+    summary.resolved_by_tm1 = index.fallback_resolved
+    summary.fallback_limit_reached = index.fallback_limit_reached
+
+    # Phase 2d: function usage.
+    function_rows = rollup_function_calls(all_function_calls)
+    summary.function_uses = len(all_function_calls)
+    summary.distinct_functions = len({row.function for row in function_rows})
+    summary.cubes_using_hierarchy_functions = len(
+        {row.cube for row in function_rows if row.category == CAT_HIERARCHY}
+    )
 
     if client.dry_run:
         summary.rule_cube_rows_written = len(cube_rows)
         summary.rule_dependency_rows_written = len(dependency_rows)
         summary.element_reference_rows_written = len(element_rows)
+        summary.rule_function_rows_written = len(function_rows)
         return summary
 
     summary.rule_cube_rows_written = write_rule_cube(client, cube_rows)
     summary.rule_dependency_rows_written = write_rule_dependencies(client, dependency_rows)
     summary.element_reference_rows_written = write_rule_element_references(client, element_rows)
+    summary.rule_function_rows_written = write_rule_functions(client, function_rows)
     return summary
