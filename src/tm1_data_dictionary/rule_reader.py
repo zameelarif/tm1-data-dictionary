@@ -1,0 +1,100 @@
+"""Read cube rule facts from a TM1 instance.
+
+This is the rules equivalent of ti_reader.py: an anti-corruption layer over
+TM1py's Cube/Rules objects, so the rest of the codebase depends on a small,
+stable dataclass rather than reaching into TM1py's object model directly.
+
+Uses TM1py's own rule parsing (Cube.has_rules, Rules.skipcheck/feedstrings/
+undefvals/has_feeders/rule_statements/feeder_statements) rather than
+re-deriving pragma detection ourselves. This is deliberately the *cube-level*
+reader only - it answers "does this cube have rules, and what shape are
+they?" It does not parse individual statements for cross-cube references,
+element literals, or feeder coverage; that is a separate, more careful,
+case-preserving parser for later phases (2b onward), because TM1py's own
+comment-stripping only recognises a whole line starting with "#" and
+uppercases every statement - adequate for counts, not for extracting exact
+element names or line-accurate detail.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from tm1_data_dictionary.tm1_client import TM1Client
+
+
+@dataclass(frozen=True)
+class CubeRuleInfo:
+    """Cube-level rule facts for one cube."""
+
+    name: str
+    dimension_names: tuple[str, ...]
+    has_rules: bool
+    has_feeders: bool
+    skipcheck: bool
+    feedstrings: bool
+    undefvals: bool
+    rule_statement_count: int
+    feeder_statement_count: int
+    raw_rule_text: str  # "" when has_rules is False; kept for later phases
+
+
+class RuleReader:
+    """Read cube rule facts via TM1py, hiding its object model from callers."""
+
+    def __init__(self, client: TM1Client) -> None:
+        self._client = client
+
+    def list_cube_names(self) -> list[str]:
+        """Return every cube name in the instance (control and model cubes).
+
+        Deliberately unfiltered - the caller (extract_rules.py) is
+        responsible for applying rule_exclusions.partition() on top, so
+        every exclusion is recorded and reported rather than silently
+        absorbed into this call.
+        """
+        return list(self._client.service.cubes.get_all_names(skip_control_cubes=False))
+
+    def exists(self, name: str) -> bool:
+        """Return whether a cube with this name exists."""
+        return bool(self._client.service.cubes.exists(name))
+
+    def read(self, name: str) -> CubeRuleInfo:
+        """Return the rule facts for one cube.
+
+        A cube with no rule text at all is a normal, expected result - not an
+        error - and is returned with has_rules=False and every rule-derived
+        field at its empty default. Callers should not skip these; a
+        HasRules=No row is itself meaningful (see schema notes on
+        }Meta_Rule_Cube).
+        """
+        cube = self._client.service.cubes.get(name)
+
+        if not cube.has_rules:
+            return CubeRuleInfo(
+                name=cube.name,
+                dimension_names=tuple(cube.dimensions),
+                has_rules=False,
+                has_feeders=False,
+                skipcheck=False,
+                feedstrings=False,
+                undefvals=False,
+                rule_statement_count=0,
+                feeder_statement_count=0,
+                raw_rule_text="",
+            )
+
+        rules = cube.rules
+
+        return CubeRuleInfo(
+            name=cube.name,
+            dimension_names=tuple(cube.dimensions),
+            has_rules=True,
+            has_feeders=bool(rules.has_feeders),
+            skipcheck=bool(rules.skipcheck),
+            feedstrings=bool(rules.feedstrings),
+            undefvals=bool(rules.undefvals),
+            rule_statement_count=len(rules.rule_statements),
+            feeder_statement_count=len(rules.feeder_statements),
+            raw_rule_text=rules.text,
+        )

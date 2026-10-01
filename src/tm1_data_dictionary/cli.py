@@ -20,6 +20,7 @@ from tm1_data_dictionary.credentials import (
 )
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
+from tm1_data_dictionary.extract_rules import extract_all_rules
 from tm1_data_dictionary.graph import build_graph, render_html
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
@@ -38,6 +39,7 @@ from tm1_data_dictionary.schema import (
     process_datasource_schema,
     process_dimension_schema,
     process_function_schema,
+    rule_cube_schema,
     unresolved_reference_schema,
 )
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
@@ -45,7 +47,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 
 # --------------------------------------------------------------------------- #
@@ -162,10 +164,11 @@ def bootstrap(config_path: str, environment: str | None) -> None:
             r6 = ensure_schema(client, process_dimension_schema())
             r7 = ensure_schema(client, unresolved_reference_schema())
             r8 = ensure_schema(client, process_function_schema())
+            r9 = ensure_schema(client, rule_cube_schema())
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    results = (r1, r2, r3, r4, r5, r6, r7, r8)
+    results = (r1, r2, r3, r4, r5, r6, r7, r8, r9)
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
@@ -551,6 +554,83 @@ def extract(
 
     click.echo("")
     click.echo("Extraction complete.")
+    for line in summary.as_lines():
+        click.echo(f"  {line}")
+
+    if audit_recorded:
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
+    elif not summary.dry_run:
+        click.echo("  Extraction succeeded, but the audit record was not written.")
+
+
+@main.command(name="extract-rules")
+@_config_option
+@_env_option
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-cube progress lines (show only the summary).",
+)
+def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) -> None:
+    """Extract cube-level rule facts (Phase 2a) for EVERY cube.
+
+    Records whether each cube has rules and feeders, which pragmas are set (SKIPCHECK,
+    FEEDSTRINGS, UNDEFVALS), and rule/feeder statement counts into }Meta_Rule_Cube.
+    Applies the rule exclusion list (control cubes by default). One unreadable cube does
+    not abort the run. Records the run into }Meta_Extraction_Audit. Honours dry-run mode.
+
+    Deliberately separate from 'extract' so TI and rule extraction succeed or fail
+    independently.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+
+    def _progress(i: int, total: int, name: str, status: str) -> None:
+        if not quiet:
+            click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
+
+    start = datetime.now(UTC)
+    run_by = f"{getpass.getuser()} via {cfg.connection.user}"
+    audit_recorded = False
+
+    try:
+        with TM1Client(cfg) as client:
+            if client.dry_run:
+                click.echo("Dry-run: reading all cube rules, nothing will be written.")
+            click.echo("Extracting rule facts for all cubes...")
+            summary = extract_all_rules(client, progress=_progress)
+
+            if not client.dry_run:
+                status = "Success" if summary.failed == 0 else "CompletedWithFailures"
+                warnings = f"{summary.failed} cube(s) failed" if summary.failed else ""
+                try:
+                    AuditWriter(client).record_run(
+                        extractor_version=__version__,
+                        schema_version=SCHEMA_VERSION,
+                        start_time=start,
+                        exit_status=status,
+                        run_by=run_by,
+                        warnings=warnings,
+                        metrics={
+                            "cubes_total": summary.total_cubes,
+                            "cubes_included": summary.included,
+                            "cubes_excluded": summary.excluded,
+                            "cubes_failed": summary.failed,
+                            "rule_cube_rows": summary.rule_cube_rows_written,
+                            "cubes_with_rules": summary.cubes_with_rules,
+                            "cubes_with_feeders": summary.cubes_with_feeders,
+                            "cubes_with_skipcheck": summary.cubes_with_skipcheck,
+                        },
+                    )
+                    audit_recorded = True
+                except Exception as exc:  # noqa: BLE001
+                    click.echo(f"  Audit record not written: {exc}")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("")
+    click.echo("Rule extraction complete.")
     for line in summary.as_lines():
         click.echo(f"  {line}")
 

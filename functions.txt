@@ -30,3 +30,13 @@ ViewZeroOut
 
 # --- Security ---
 SecurityRefresh
+
+# --- Element management ---
+DimensionElementInsert
+DimensionElementDelete
+HierarchyElementInsert
+HierarchyElementDelete
+AttrPutS
+AttrPutN
+ElementAttrPutS
+ElementAttrPutN
