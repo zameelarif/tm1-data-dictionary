@@ -1,219 +1,125 @@
-# User Guide — TM1 Data Dictionary (`tm1dd`)
+# User guide
 
-This guide explains what the tool does and how to use it day to day. If you have
-not installed it yet, start with **INSTALLATION_GUIDE.md**.
+How to run `tm1dd` day to day. For what each extraction captures, see
+[TI lineage](TI_LINEAGE.md) and [Rules analysis](RULES_ANALYSIS.md).
 
----
-
-## 1. What problem this solves
-
-A TM1 model is a web of processes, cubes, dimensions, datasources, and chores.
-The relationships between them are hidden inside TurboIntegrator (TI) code.
-`tm1dd` reads that code and turns the hidden relationships into **queryable
-lineage cubes**, so you can answer questions like:
-
-- Where does the data in this cube come from?
-- What runs automatically, and in what order?
-- What will break if I change this process or cube?
-- Which processes maintain this dimension and its attributes?
-- What calls this process?
+Every command that talks to TM1 accepts `--env <name>` and `--config <path>`.
 
 ---
 
-## 2. Core concepts
+## Commands
 
-### Lineage
-A recorded relationship, for example *process X writes cube Y* or *chore A runs
-process B*. Each relationship type is stored in its own `}Meta_*` cube.
+### Setup
 
-### Roles
-For cube lineage, a process is recorded as **reading** or **writing** a cube.
-For dimension lineage, a process is recorded as **DimUpdate** (builds/maintains
-elements) or **AttrWrite** (sets attributes).
+| Command | Purpose |
+|---|---|
+| `tm1dd set-credential --name <entry>` | Store a password in the OS keyring |
+| `tm1dd bootstrap` | Create every `}Meta_*` dimension and cube. Safe to re-run; existing objects are left untouched |
+| `tm1dd record-run --status <text>` | Write a test row to `}Meta_Extraction_Audit` to prove the write path |
 
-### Const-propagation
-TI often targets cubes/dimensions through variables (e.g. `cCube`). Where the
-variable's value can be traced to a literal safely, `tm1dd` resolves it. Where
-it can't (e.g. the value comes from a cube read), the reference is left
-**unresolved** and reported separately.
+### Whole-model extraction
 
-### Exclusions
-Utility/Bedrock, control (`}`-prefixed), and test/temp processes are excluded so
-the dictionary reflects your real model. Excluded processes are counted and
-recorded, never silently dropped.
+| Command | Purpose |
+|---|---|
+| `tm1dd extract [--functions <file>] [--quiet]` | TI lineage for every included process |
+| `tm1dd extract-rules [--quiet]` | Rules analysis for every included cube |
+| `tm1dd export-graph [--out <file>] [--title <text>] [--vis-js <file>]` | Interactive HTML map of processes, cubes, datasources and chores |
 
-### Dry-run
-When `dry_run: true`, the whole pipeline runs and reports counts but writes
-nothing. Great for a first look at a new environment.
+### Single-process investigation (read-only)
 
----
-
-## 3. The lineage cubes
-
-| Cube | Dimensions (simplified) | Answers |
-|------|-------------------------|---------|
-| `}Meta_Process_Cube` | Process × Cube × Role × Measure | Who reads/writes this cube? |
-| `}Meta_Process_Chain` | Caller × Callee × Measure | Who triggers whom? |
-| `}Meta_Process_Datasource` | Process × Datasource × Measure | Where does data enter? |
-| `}Meta_Chore_Process` | Chore × Process × Measure | What runs on a schedule? |
-| `}Meta_Process_Dimension` | Process × Dimension × Role × Measure | Who maintains this dimension/attributes? |
-| `}Meta_Extraction_Audit` | ExtractionRun × Measure | When/who/what happened in each run? |
+| Command | Purpose |
+|---|---|
+| `tm1dd list-processes [--contains <text>]` | List process names |
+| `tm1dd inspect-process <name>` | Blocks, datasource, variables, parameters |
+| `tm1dd extract-refs <name>` | Every lineage reference in one process, with resolved targets |
+| `tm1dd show-vars <name> [--all-assignments]` | Where each variable gets its value |
+| `tm1dd extract-cube <name>` | Write one process's cube lineage |
+| `tm1dd extract-chain <name>` | Write one process's chain dependencies |
+| `tm1dd diagnose-unresolved [--top N] [--process <name>] [--expression <text>]` | Report cube targets that stayed dynamic |
 
 ---
 
-## 4. Everyday commands
+## Dry-run
 
-All commands take `--env <name>` to select an environment from `config.yaml`
-(defaults to `default_environment`).
-
-### Build the whole dictionary
-```powershell
-tm1dd extract --env dev
-```
-Add `--quiet` to show only the summary.
-
-### Create/refresh the schema
-```powershell
-tm1dd bootstrap --env dev
-```
-
-### List processes
-```powershell
-tm1dd list-processes --env dev --contains sales
-```
-
-### Inspect one process
-```powershell
-tm1dd inspect-process "Cube.Sales.Load" --env dev
-```
-
-### See the references in one process
-```powershell
-tm1dd extract-refs "Cube.Sales.Load" --env dev
-```
-
-### See where a variable's value comes from
-```powershell
-tm1dd show-vars "Cube.Sales.Load" --env dev
-tm1dd show-vars "Cube.Sales.Load" --env dev --all-assignments
-```
-
-### Extract a single cube's or chain's lineage
-```powershell
-tm1dd extract-cube "Cube.Sales.Load" --env dev
-tm1dd extract-chain "Cube.Sales.Load" --env dev
-```
-
-### Record an audit run manually
-```powershell
-tm1dd record-run --env dev --status Success
-```
+`dry_run: true` in `config.yaml` (the default in the template) makes every command read
+and report but clear and write nothing. Summaries show *(dry-run: not written)*. Use it
+on a new environment first, and on production whenever you only need the counts.
 
 ---
 
-## 5. Understanding the extraction summary
+## How a full run behaves
 
-A run ends with something like:
+Both `extract` and `extract-rules`:
 
-```
-  Processes: 492 total, 117 included, 375 excluded
-  Parsed OK: 117, failed: 0
-  Cube-lineage rows: 73 written
-  Chain-lineage rows: 105 written
-  Datasource rows: 74 written
-  Chore rows: 13 written
-  Dimension rows: 58 written
-  Unresolved cube references: 130
-  Unresolved chain references: 149
-  Unresolved dimension references: 9
-```
+1. Apply the exclusion list, and record every excluded object with a reason.
+2. Clear their own target cubes once (full clear-and-reload, so stale rows never linger).
+3. Read each object once; one unreadable process or cube is counted as failed and the
+   run continues.
+4. Write each cube in one batch.
+5. Record the run in `}Meta_Extraction_Audit`.
+6. Print a summary.
 
-- **included/excluded** — how exclusion rules split your processes.
-- **Parsed OK / failed** — per-process parse results (failures are isolated).
-- **rows written** — how many lineage facts landed in each cube.
-- **Unresolved references** — targets that stayed dynamic and were not written.
-  These are candidates for manual review (see next section).
+Neither command touches the other's cubes, so they can run separately.
 
 ---
 
-## 6. Diagnosing unresolved references
+## Audit trail: `}Meta_Extraction_Audit`
 
-Some cube/dimension targets can't be resolved by static parsing (for example,
-a cube name read from another cube at run time). Use `diagnose-unresolved` to
-investigate.
+Every run of `extract` and `extract-rules` adds one element to `}Meta_ExtractionRun`,
+named by its UTC end time (e.g. `2026-10-01T09:15:00Z`).
 
-### Whole-model "top offenders"
-```powershell
-tm1dd diagnose-unresolved --env dev --top 25
-```
+| Measure | Meaning |
+|---|---|
+| `ExtractorVersion` / `SchemaVersion` | Tool and schema version that produced the data |
+| `StartTime` / `EndTime` / `DurationSeconds` | Timing |
+| `ExitStatus` | `Success` or `CompletedWithFailures` |
+| `RunBy` | Windows user and TM1 user, e.g. `jsmith via TM1_SERVICE_USER` |
+| `Warnings` | e.g. how many objects failed |
+| Run metrics | Every count in the run summary, as its own measure (`CubeRows`, `MissingElements`, ...) |
 
-### One process in detail
-```powershell
-tm1dd diagnose-unresolved --env dev --process "Cube.Sales.Load"
-```
-
-### Every place a specific expression appears
-```powershell
-tm1dd diagnose-unresolved --env dev --expression "cCube"
-# Use "" to find blank-target parse edge cases:
-tm1dd diagnose-unresolved --env dev --expression ""
-```
+Run metrics are created on first use, so a new release can add metrics without a
+re-bootstrap. `extract` and `extract-rules` record different metrics; each run leaves the
+other command's metrics empty. Comparing runs shows trends, e.g. a rise in
+`MissingElements` means someone renamed or deleted an element that rules still use.
 
 ---
 
-## 7. The interactive data-flow map
+## Common workflows
 
-Export an HTML map of processes, cubes, datasources, and chores:
+**"Which process loads this cube?"** – `}Meta_Process_Cube`, filter the cube, role
+`CubeWrite`. Then `}Meta_Process_Datasource` for where that process reads from.
 
-```powershell
-tm1dd export-graph --env dev --out data_flow.html
-```
+**"What breaks if I retire this process?"** – `}Meta_Process_Chain` with the process on
+the callee axis, and `}Meta_Chore_Process` for chores that run it.
 
-Open the file in a browser. For a fully offline file (no CDN), pass a local copy
-of `vis-network.min.js`:
+**"Is this element safe to rename or delete?"** – `}Meta_Rule_Element_Reference`, filter
+the element. Any row means a rule or feeder names it.
 
-```powershell
-tm1dd export-graph --env dev --out data_flow.html --vis-js .\vis-network.min.js
-```
+**"What is broken right now?"** – `}Meta_Rule_Element_Reference` with
+`ElementExists = No`, and `}Meta_Cube_Rule_Dependency` with `RelatedCubeExists = No`, and
+`}Meta_Process_Cube` with `CubeExists = No`.
 
----
-
-## 8. Common use cases
-
-### "I've just inherited this model."
-1. `tm1dd extract --env dev`
-2. `tm1dd export-graph --env dev --out data_flow.html`
-3. Open the map, then slice `}Meta_Chore_Process` to see what runs automatically.
-
-### "Where does this cube's data come from?"
-Slice `}Meta_Process_Datasource` and `}Meta_Process_Cube` (writing role) for the
-cube.
-
-### "What breaks if I change this process?"
-Slice `}Meta_Process_Chain` for the process as a **callee** to see who triggers
-it, and as a **caller** to see what it triggers.
-
-### "Which processes maintain this dimension?"
-Slice `}Meta_Process_Dimension` filtered to that dimension; the **DimUpdate**
-role shows element maintenance, **AttrWrite** shows attribute updates.
+**"Why are some cube targets missing from the lineage?"** – `tm1dd diagnose-unresolved`,
+or `}Meta_Unresolved_Reference`.
 
 ---
 
-## 9. Good practice
+## Scheduling
 
-- Re-run `tm1dd extract` after significant model changes so the dictionary stays
-  current.
-- Use `dry_run: true` when pointing at an unfamiliar environment for the first
-  time.
-- Check the audit cube (`}Meta_Extraction_Audit`) to confirm the last successful
-  run and watch for unexpected drops in row counts.
-- Keep unresolved-reference counts in view — a rising count usually means new
-  dynamic code that a human should review.
+Both extractions are safe to schedule (for example with Windows Task Scheduler) once
+`dry_run: false` is set. Run them as the Windows user who stored the keyring credential.
+A daily or post-deployment run keeps the dictionary current and builds the audit trail.
 
 ---
 
-## 10. Getting help
+## Troubleshooting
 
-- Every command supports `--help`, e.g. `tm1dd extract --help`.
-- For setup and troubleshooting, see **INSTALLATION_GUIDE.md**.
-- For development history and the backlog, see **BUILD_JOURNAL.md**.
+| Symptom | Cause and fix |
+|---|---|
+| `Environment variable 'X' ... is not set` | A `*_env` field holds a value instead of a variable name. Use the literal field (`address:`) or set the variable |
+| `Required credential 'None' could not be resolved` | `password_env` is missing or blank for that environment |
+| Credential not found under a scheduled task | Store it with `set-credential` while logged in as the task's Windows user |
+| A new cube is missing after upgrading | Run `tm1dd bootstrap --env <name>` |
+| `tm1dd --version` shows the old version | Bump `__version__` in `__init__.py` as well as `pyproject.toml` |
+| Config edits seem ignored | Check the file on disk (`Get-Content config.yaml`) – the editor may not have saved |
+| Summary lists *Aliases not readable* | See [Rules analysis – Element lookup](RULES_ANALYSIS.md#how-elements-are-looked-up) |
