@@ -2,9 +2,9 @@
 
 `tm1dd extract-rules` reads the rule text of every included cube and records what the
 rules and feeders do: which cubes are rule-driven, which other cubes they read from or
-feed, which elements they name, and which functions they use. Its main purpose is to let
-an administrator answer *"is it safe to change this?"* before renaming an element,
-restructuring a hierarchy or retiring a cube.
+feed, which elements they name, which functions they use, and where feeders are missing
+or wrong. Its main purpose is to let an administrator answer *"is it safe to change
+this?"* before renaming an element, restructuring a hierarchy or retiring a cube.
 
 TI processes are covered separately, by `tm1dd extract` – see [TI lineage](TI_LINEAGE.md).
 The two commands are independent; a failure in one never affects the other.
@@ -80,8 +80,9 @@ Every `DB()` call in rules and feeders, one row per (cube, related cube, type):
 in the instance. Related cubes are matched against every cube, including control cubes, so
 a rule reading a `}`-cube is not reported as dangling.
 
-A `DB()` whose cube name is an expression (for example `DB(IF(...), ...)`) cannot be tied
-to a cube; it is counted as *unresolved* in the summary and not written.
+A `DB()` whose cube name is an expression (for example `DB(IF(...), ...)`) is counted as
+*unresolved* in the summary and not written here. (Phase 2e does resolve `IF` targets whose
+branches are all text – see below.)
 
 ---
 
@@ -145,8 +146,8 @@ model that count should be 0.
 - **Before renaming or deleting an element:** filter the element. No rows means no rule or
   feeder names it. (TI processes are not covered here; check `}Meta_Process_Dimension` and
   the process code as well.)
-- **Finding broken references:** filter `ElementExists = No`. A feeder target that does
-  not exist feeds nothing, so values may silently disappear once other feeders change.
+- **Finding broken references:** filter `ElementExists = No` (view `tm1dd Broken
+  References`).
 
 ---
 
@@ -180,10 +181,9 @@ and `Lines` (every statement line using it).
 
 ## 2e – Feeder gaps: `}Meta_Rule_Feeder_Finding`
 
-With SKIPCHECK, TM1 only calculates a rule cell if it is *fed*. A missing feeder makes
-values silently disappear; a feeder aimed at the wrong place, or at cells no rule
-calculates, wastes memory and slows the server (over-feeding). Phase 2e compares every
-rule's area with every feeder's target, across cubes.
+With SKIPCHECK, TM1 only calculates a rule cell if it is *fed*. A feeder aimed at the wrong
+place, or at cells no rule calculates, wastes memory and slows the server (over-feeding).
+Phase 2e compares every rule's area with every feeder's target, across cubes.
 
 | Finding | Severity | Meaning | What to do |
 |---|---|---|---|
@@ -198,6 +198,18 @@ One row per (cube, statement, finding type). `}Meta_RuleStatement` holds keys su
 `Count`, `Severity`, `Section`, `Line`, `Statement`, `Detail` (which target or element) and
 `RelatedCube`.
 
+### What an unfed rule actually does
+
+An unfed rule cell **still calculates when something reads it directly** – another rule,
+`DB()`, or a cell reference in a view. What goes wrong:
+
+- it is **hidden by zero suppression**, so it disappears from views and reports;
+- it is **not included when consolidations are calculated**, so totals above it are short.
+
+So an unfed flag that is only ever read by another rule (for example a `-1` used in an
+`IF`) may work today, while an unfed planning measure shows blanks at total level. Check
+how the cell is used before deciding how urgent a finding is.
+
 ### How the comparison works
 
 - An area becomes "these elements in these dimensions"; dimensions not named are
@@ -206,6 +218,10 @@ One row per (cube, statement, finding type). `}Meta_RuleStatement` holds keys su
   `['Local','Salaries'] => ['Payroll Taxes']` feeds Local / Payroll Taxes.
 - A target `DB('Cube', ...)` restricts each dimension whose argument is a literal. `!Dim`
   and expressions are unrestricted.
+- A target cube written as `IF(condition, 'CubeA', 'CubeB')` – including nested `IF`s – is
+  checked against every cube its branches name. An empty string means "feed nothing".
+  This is the common conditional-feeder pattern
+  `DB(IF(<condition>, 'Employee', ''), ...)`.
 - Two areas overlap if, in every dimension both restrict, some pair of elements is the same
   or one is an ancestor of the other. Feeding a consolidation feeds every leaf beneath it.
   Each dimension's hierarchy is read once per run.
@@ -215,16 +231,18 @@ One row per (cube, statement, finding type). `}Meta_RuleStatement` holds keys su
 - Rules with `C:` or `S:`, rules that are just `STET`, and unqualified rules on
   consolidations only – these do not need feeders.
 - Rules in cubes without SKIPCHECK – nothing needs feeding.
-- Feeders into a cube that was not read (excluded), and feeders whose target cube is an
-  expression. The latter are counted in the summary, and `UnfedRule` details say so when any
-  exist, because such a feeder may be the one that feeds the rule.
+- Feeders into a cube that was not read (excluded).
+- Feeders whose target cube cannot be determined (for example `DB(ATTRS(...), ...)`).
+  These are counted as *dynamic target* in the summary. While any exist, every `UnfedRule`
+  detail ends with *"(feeders with a dynamic target cube were not checked)"*, because such
+  a feeder could reach any cube.
 
 ### Reading the results
 
-`UnfedRule` means no feeder *statement* can reach the area – not that every cell is empty.
-Input cells and cells fed by a dynamic-target feeder still show. Treat it as "check this",
-and `DeadFeeder` as "fix this". Elements that cannot be placed are treated as unrestricted,
-so the check only reports clear gaps.
+Treat `DeadFeeder` as "fix this" and `UnfedRule` as "check this". `UnfedRule` means no
+feeder *statement* reaches the area; input cells and cells fed by a dynamic-target feeder
+still show. Elements that cannot be placed are treated as unrestricted, so the check only
+reports clear gaps.
 
 ---
 
@@ -244,7 +262,7 @@ excluded control cube resolves correctly.
 |---|---|
 | Cubes: total / included / excluded | After exclusions |
 | Read OK / failed | Failed cubes are listed; the run continues |
-| Rule-cube, rule-dependency, element-reference, rule-function rows | Rows written to each cube |
+| Rule-cube, rule-dependency, element-reference, rule-function, feeder-finding rows | Rows written to each cube |
 | Cubes with rules / feeders / SKIPCHECK | From 2a |
 | DB() references, unresolved, dangling | From 2b |
 | Element references; missing / ambiguous / not checked | From 2c |
@@ -265,5 +283,5 @@ The same counts are stored in `}Meta_Extraction_Audit` for each run.
   alternate hierarchy is reported as missing.
 - Rule areas that use `CONTINUE` chains or overlapping areas are recorded as written; the
   tool does not work out which rule wins for a given cell.
-- Feeder checks are static: they cannot see cell values, conditional feeders' runtime
-  behaviour, or which rule wins where areas overlap.
+- Feeder checks are static: they cannot see cell values or what a conditional feeder's
+  condition evaluates to at run time.

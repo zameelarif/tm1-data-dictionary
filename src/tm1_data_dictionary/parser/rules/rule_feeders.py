@@ -1,9 +1,10 @@
 """Feeder-gap detection (Phase 2e).
 
 With SKIPCHECK, TM1 only calculates a rule cell if it is *fed*. Missing feeders make
-values silently disappear; feeders that point at the wrong place, or at cells no rule
-calculates, waste memory (over-feeding). This module compares, statically, every rule's
-area with every feeder's target area - across cubes - and reports:
+values silently disappear from zero-suppressed views and consolidations; feeders that
+point at the wrong place, or at cells no rule calculates, waste memory (over-feeding).
+This module compares, statically, every rule's area with every feeder's target area -
+across cubes - and reports:
 
 - ``UnfedRule`` (Warning) - a leaf-level rule in a SKIPCHECK cube that no feeder reaches.
 - ``DeadFeeder`` (Error) - a feeder whose target names an element or cube that does not
@@ -20,15 +21,18 @@ An area becomes ``{dimension: {elements}}``; dimensions not named are unrestrict
 feeder target ``[...]`` keeps the source area and replaces the dimensions it names
 (``['Local','Salaries'] => ['Payroll Taxes']`` targets Local / Payroll Taxes). A target
 ``DB('Cube', ...)`` restricts each dimension whose argument is a literal; ``!Dim`` and
-expressions are unrestricted. Two areas *overlap* if, in every dimension both restrict,
-some pair of elements is the same or one is an ancestor of the other (feeding a
-consolidation feeds every leaf beneath it).
+expressions are unrestricted. A target cube written as ``IF(...)`` whose branches are all
+text is checked against each cube it names (an empty string means "feed nothing"); any
+other expression cannot be resolved and is counted as a dynamic target. Two areas
+*overlap* if, in every dimension both restrict, some pair of elements is the same or one
+is an ancestor of the other (feeding a consolidation feeds every leaf beneath it).
 
 What it does not claim
 ----------------------
 Static analysis cannot see values. ``UnfedRule`` means *no feeder statement can feed this
 area*, not that every cell is empty - a cell may still show because it is input or
-because of a feeder with a dynamic target cube (counted in the summary). Ambiguous or
+because of a feeder with a dynamic target cube (counted in the summary, and noted on every
+UnfedRule while any exist, since such a feeder could reach any cube). Ambiguous or
 unresolved elements are treated optimistically (as unrestricted), so the checker reports
 only clear gaps, never guesses. Rules on consolidations only (no ``N:``) and string rules
 are not expected to be fed.
@@ -36,10 +40,15 @@ are not expected to be fed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
+from tm1_data_dictionary.parser.references import (
+    _extract_arg_string,
+    _split_top_level_args,
+)
 from tm1_data_dictionary.parser.rules.rule_dependencies import literal_value
 from tm1_data_dictionary.parser.rules.rule_element_references import (
     AMBIGUOUS_DIMENSION,
@@ -65,6 +74,10 @@ CUBE_LEVEL_KEY = "Cube"
 SEVERITY_ERROR = "Error"
 SEVERITY_WARNING = "Warning"
 SEVERITY_INFO = "Info"
+
+DYNAMIC_NOTE = " (feeders with a dynamic target cube were not checked)"
+
+_IF_PREFIX = re.compile(r"^IF\s*\(", re.IGNORECASE)
 
 
 class FindingType(str, Enum):
@@ -173,6 +186,36 @@ def _consolidated_only(area: ResolvedArea, hierarchy: Hierarchy) -> bool:
     )
 
 
+def candidate_cubes(expression: str) -> set[str] | None:
+    """Return every cube name a feeder's cube argument can evaluate to, or None.
+
+    A literal gives one name. ``IF(condition, a, b)`` gives the names of both branches,
+    following nested IFs. An empty string means "no target" (TM1 feeds nothing) and adds
+    no name. Anything else - a variable, ``ATTRS(...)``, a concatenation - cannot be known
+    statically and returns None.
+    """
+    text = expression.strip()
+    value = literal_value(text)
+    if value is not None:
+        return {value} if value else set()
+    match = _IF_PREFIX.match(text)
+    if match is None:
+        return None
+    inner, end = _extract_arg_string(text, match.end() - 1)
+    if text[end + 1 :].strip():
+        return None  # something follows the IF(...), e.g. IF(...) | 'x'
+    args = _split_top_level_args(inner)
+    if len(args) != 3:
+        return None
+    names: set[str] = set()
+    for branch in args[1:]:
+        branch_names = candidate_cubes(branch)
+        if branch_names is None:
+            return None
+        names |= branch_names
+    return names
+
+
 # --------------------------------------------------------------------------- #
 # Findings
 # --------------------------------------------------------------------------- #
@@ -207,7 +250,7 @@ class FeederAnalysis:
     findings: list[FeederFinding]
     rules_checked: int = 0
     feeders_checked: int = 0
-    dynamic_feeder_targets: int = 0  # DB() targets whose cube is an expression
+    dynamic_feeder_targets: int = 0  # DB() targets whose cube cannot be determined
 
     def count(self, finding_type: FindingType) -> int:
         return sum(1 for f in self.findings if f.finding_type == finding_type)
@@ -361,7 +404,7 @@ def analyze_feeders(
             ):
                 detail = "no feeder targets this area"
                 if analysis.dynamic_feeder_targets:
-                    detail += " (feeders with a dynamic target cube were not checked)"
+                    detail += DYNAMIC_NOTE
                 collector.add(
                     info.name,
                     FindingType.UNFED_RULE,
@@ -413,7 +456,7 @@ def _collect_target(
     collector: _Collector,
     analysis: FeederAnalysis,
 ) -> None:
-    """Resolve one feeder target and file it under its target cube (or as a finding)."""
+    """Resolve one feeder target and file it under its target cube(s), or as a finding."""
     st = feeder.statement
     stripped = target.strip()
 
@@ -442,10 +485,39 @@ def _collect_target(
     if not calls or calls[0][0] != 0 or not calls[0][1]:
         return  # not a recognisable target
     args = calls[0][1]
-    cube_name = literal_value(args[0])
-    if not cube_name:
+    names = candidate_cubes(args[0])
+    if names is None:
         analysis.dynamic_feeder_targets += 1
         return
+    for cube_name in sorted(names):
+        _collect_db_target(
+            info,
+            feeder,
+            stripped,
+            cube_name,
+            args,
+            index,
+            dims_by_key,
+            canonical,
+            incoming,
+            collector,
+        )
+
+
+def _collect_db_target(
+    info: CubeRuleInfo,
+    feeder: ParsedFeeder,
+    stripped: str,
+    cube_name: str,
+    args: list[str],
+    index: ElementLookup,
+    dims_by_key: dict[str, tuple[str, ...]],
+    canonical: dict[str, str],
+    incoming: dict[str, list[_Target]],
+    collector: _Collector,
+) -> None:
+    """File one ``DB()`` feeder target under a known cube name, or as a dead feeder."""
+    st = feeder.statement
     key = _normalise(cube_name)
     target_cube = canonical.get(key)
     if target_cube is None:
