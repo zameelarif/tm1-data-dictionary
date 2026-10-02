@@ -96,21 +96,31 @@ wheels rarely change), delete the old `tm1_data_dictionary` wheel, then:
 .\.venv\Scripts\Activate.ps1
 pip install --no-index --find-links=.\offline --upgrade tm1_data_dictionary
 tm1dd --version
-tm1dd bootstrap --env <name>     # creates any cubes added by the new release
 ```
 
-**Upgrading from schema 1.5 or earlier:** three cubes were renamed in 1.6 so that TI cubes
-and rules cubes sort together. After upgrading, run:
+Then bring the schema up to date, without losing data or views:
 
 ```powershell
-tm1dd bootstrap --env <name> --drop-legacy
-tm1dd extract --env <name>
-tm1dd extract-rules --env <name>
+tm1dd bootstrap --env <name> --check          # read-only: what needs doing
+tm1dd bootstrap --env <name> --drop-legacy    # add what is missing; remove renamed cubes
 ```
 
-`--drop-legacy` deletes the old cubes (`}Meta_Chore_Process`, `}Meta_Unresolved_Reference`,
-`}Meta_Cube_Rule_Dependency`); the next extractions fill the new ones. Dimensions are
-unchanged. Any saved views or reports on the old cube names must be re-pointed.
+If `--check` listed cubes as **REBUILD**, rebuild only those (their data and views are
+deleted; any views you made on them must be re-created):
+
+```powershell
+tm1dd bootstrap --env <name> --rebuild-cube "<cube name>"
+```
+
+Then refresh the data and the standard views:
+
+```powershell
+tm1dd extract --env <name>
+tm1dd extract-rules --env <name>
+tm1dd create-views --env <name>
+```
+
+See [User guide – Upgrading the schema](USER_GUIDE.md#upgrading-the-schema).
 
 If `tm1dd --version` shows the old number, check `pip show tm1_data_dictionary`. If pip
 has the new version, only `__init__.py` was not bumped.
@@ -191,4 +201,5 @@ When the dry-run counts look right, set `dry_run: false` for that environment, t
 tm1dd bootstrap --env dev
 tm1dd extract --env dev
 tm1dd extract-rules --env dev
+tm1dd create-views --env dev
 ```

@@ -9,7 +9,16 @@ from pathlib import Path
 import click
 
 from tm1_data_dictionary import __version__
-from tm1_data_dictionary.bootstrap import ensure_schema
+from tm1_data_dictionary.bootstrap import (
+    STATUS_ADD,
+    STATUS_CREATE,
+    STATUS_REBUILD,
+    all_schemas,
+    check_schema,
+    ensure_schema,
+    execute_rebuild,
+    plan_rebuild,
+)
 from tm1_data_dictionary.chore_reader import ChoreReader
 from tm1_data_dictionary.config import ConfigError, load_config
 from tm1_data_dictionary.credentials import (
@@ -31,22 +40,7 @@ from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
-from tm1_data_dictionary.schema import (
-    LEGACY_CUBES,
-    audit_schema,
-    chore_process_schema,
-    process_chain_schema,
-    process_cube_schema,
-    process_datasource_schema,
-    process_dimension_schema,
-    process_function_schema,
-    rule_cube_schema,
-    rule_dependency_schema,
-    rule_element_reference_schema,
-    rule_feeder_finding_schema,
-    rule_function_schema,
-    unresolved_reference_schema,
-)
+from tm1_data_dictionary.schema import LEGACY_CUBES
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.views import DEFAULT_PREFIX, create_views
 from tm1_data_dictionary.writers.audit_writer import AuditWriter
@@ -151,73 +145,184 @@ def set_credential(name: str) -> None:
         )
 
 
+def _print_check(check) -> None:  # noqa: ANN001
+    """Print a schema check: one line per object that is not OK, then a summary."""
+    labels = {
+        STATUS_CREATE: "missing  - bootstrap will create it",
+        STATUS_ADD: "outdated - bootstrap will add",
+        STATUS_REBUILD: "REBUILD  -",
+    }
+    for item in check.items:
+        if item.status in labels:
+            detail = f" {item.detail}" if item.detail else ""
+            click.echo(f"  {item.kind:<9} {item.name:<34} {labels[item.status]}{detail}")
+    ok = len(check.with_status("OK"))
+    click.echo(
+        f"{ok} OK, {len(check.with_status(STATUS_CREATE))} to create, "
+        f"{len(check.with_status(STATUS_ADD))} to update, "
+        f"{len(check.with_status(STATUS_REBUILD))} need a rebuild."
+    )
+
+
+def _rebuild_hint(cubes: list[str], env_flag: str) -> str:
+    names = " ".join(f'--rebuild-cube "{name}"' for name in cubes)
+    return f"tm1dd bootstrap{env_flag} {names}"
+
+
+def _run_check(client: TM1Client, env_flag: str) -> None:
+    check = check_schema(client)
+    _print_check(check)
+    if check.up_to_date:
+        click.echo("Schema is up to date. Nothing to do.")
+        return
+    if check.with_status(STATUS_CREATE) or check.with_status(STATUS_ADD):
+        click.echo(f"Run: tm1dd bootstrap{env_flag}   (adds what is missing, deletes nothing)")
+    if check.cubes_to_rebuild:
+        click.echo("These cubes cannot be fixed in place. Rebuild them (their data and views")
+        click.echo("are deleted; re-run the extractions and create-views afterwards):")
+        click.echo(f"  {_rebuild_hint(check.cubes_to_rebuild, env_flag)}")
+
+
+def _run_rebuild(client: TM1Client, names: list[str], label: str, assume_yes: bool) -> bool:
+    """Delete the named cubes (after confirmation). Return True if anything was deleted."""
+    try:
+        plan = plan_rebuild(client, names)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    verb = "would delete" if client.dry_run else "delete"
+    for name in plan.not_found:
+        click.echo(f"  {name} does not exist yet - it will simply be created")
+    for name in plan.cubes:
+        click.echo(f"  {verb}  cube       {name}")
+        views = plan.views.get(name, [])
+        if views:
+            click.echo(f"           with {len(views)} public view(s): {', '.join(views)}")
+    for name in plan.dimensions:
+        click.echo(f"  {verb}  dimension  {name}  (element types changed)")
+    if not plan.cubes:
+        return False
+    if client.dry_run:
+        click.echo("Dry-run: nothing deleted.")
+        return False
+    if not assume_yes:
+        click.confirm(
+            f"Delete {len(plan.cubes)} cube(s) in '{label}' and create them again? "
+            "Their data and views are lost",
+            abort=True,
+        )
+    result = execute_rebuild(client, plan)
+    for name in result.deleted_cubes:
+        click.echo(f"  deleted cube       {name}")
+    for name in result.deleted_dimensions:
+        click.echo(f"  deleted dimension  {name}")
+    for name, error in result.failed:
+        click.echo(f"  FAILED to delete {name}: {error}")
+    return bool(result.deleted_cubes)
+
+
 @main.command()
 @_config_option
 @_env_option
+@click.option(
+    "--check",
+    "check_only",
+    is_flag=True,
+    default=False,
+    help="Read-only: report what is missing, outdated or needs a rebuild. Changes nothing.",
+)
+@click.option(
+    "--rebuild-cube",
+    "rebuild_cubes",
+    multiple=True,
+    metavar="NAME",
+    help="Delete this tm1dd cube and create it again (repeatable). Its data and views "
+    "are lost. Only needed when --check says REBUILD.",
+)
+@click.option(
+    "--yes",
+    "assume_yes",
+    is_flag=True,
+    default=False,
+    help="With --rebuild-cube, do not ask for confirmation (for scripts).",
+)
 @click.option(
     "--drop-legacy",
     is_flag=True,
     default=False,
     help="Also delete cubes from older schema versions that tm1dd no longer writes.",
 )
-def bootstrap(config_path: str, environment: str | None, drop_legacy: bool) -> None:
-    """Create the }Meta_* schema (dimensions and cubes) in the target TM1 instance.
+def bootstrap(
+    config_path: str,
+    environment: str | None,
+    check_only: bool,
+    rebuild_cubes: tuple[str, ...],
+    assume_yes: bool,
+    drop_legacy: bool,
+) -> None:
+    """Create the }Meta_* schema, and bring an existing one up to date.
 
-    Idempotent: objects that already exist are left untouched. Honours dry-run mode.
-    With --drop-legacy, cubes renamed in schema 1.6 are deleted under their old names
-    (only cubes - dimensions are shared and kept).
+    \b
+    Default:          create missing dimensions and cubes, and add missing elements
+                      (e.g. new measures) to existing dimensions. Never deletes or
+                      changes existing data or views. Safe on an instance in use.
+    --check:          read-only report of what is missing, outdated or needs a rebuild.
+    --rebuild-cube:   delete the named tm1dd cube(s) and create them again - only
+                      for changes that cannot be applied in place (--check says so).
+    --drop-legacy:    delete cubes renamed in schema 1.6.
     """
+    if check_only and (rebuild_cubes or drop_legacy):
+        raise click.UsageError("--check is read-only; use it on its own.")
+    if assume_yes and not rebuild_cubes:
+        raise click.UsageError("--yes only applies with --rebuild-cube.")
     cfg = _load(config_path, environment)
     _echo_env(cfg)
-    schemas = (
-        audit_schema(),
-        process_cube_schema(),
-        process_chain_schema(),
-        process_datasource_schema(),
-        chore_process_schema(),
-        process_dimension_schema(),
-        unresolved_reference_schema(),
-        process_function_schema(),
-        rule_cube_schema(),
-        rule_dependency_schema(),
-        rule_element_reference_schema(),
-        rule_function_schema(),
-        rule_feeder_finding_schema(),
-    )
+    label = cfg.environment or "default environment"
+    env_flag = f" --env {cfg.environment}" if cfg.environment else ""
+    rebuilt = False
+    dropped: list[str] = []
     try:
         with TM1Client(cfg) as client:
-            results = tuple(ensure_schema(client, schema) for schema in schemas)
-            dropped: list[str] = []
+            if check_only:
+                _run_check(client, env_flag)
+                return
+            if rebuild_cubes:
+                rebuilt = _run_rebuild(client, list(rebuild_cubes), label, assume_yes)
+                if client.dry_run:
+                    return
+            results = tuple(ensure_schema(client, schema) for schema in all_schemas())
             if drop_legacy:
                 for name in LEGACY_CUBES:
                     if not client.service.cubes.exists(name):
                         continue
-                    if client.dry_run:
-                        click.echo(f"  would delete legacy cube {name} (dry-run)")
-                        continue
                     client.ensure_writable("delete legacy cube")
                     client.service.cubes.delete(name)
                     dropped.append(name)
+            remaining = check_schema(client).cubes_to_rebuild
     except TM1ClientError as exc:
         raise click.ClickException(str(exc)) from exc
 
     for name in dropped:
         click.echo(f"  deleted legacy cube {name}")
-
     for result in results:
         for name in result.dimensions_created:
             click.echo(f"  created dimension  {name}")
-        for name in result.dimensions_skipped:
-            click.echo(f"  exists  dimension  {name}")
+        for dim, element in result.elements_added:
+            click.echo(f"  added element      {dim} / {element}")
         for name in result.cubes_created:
             click.echo(f"  created cube       {name}")
-        for name in result.cubes_skipped:
-            click.echo(f"  exists  cube       {name}")
 
     if any(r.created_anything for r in results):
-        click.echo("Bootstrap complete: schema created.")
+        click.echo("Bootstrap complete: schema created or updated.")
     else:
         click.echo("Bootstrap complete: schema already present, nothing to do.")
+    if rebuilt:
+        click.echo("Next: refill the rebuilt cubes and their views:")
+        click.echo(f"  tm1dd extract{env_flag}")
+        click.echo(f"  tm1dd extract-rules{env_flag}")
+        click.echo(f"  tm1dd create-views{env_flag}")
+    if remaining:
+        click.echo(f"WARNING: {len(remaining)} cube(s) have an outdated shape and need a rebuild:")
+        click.echo(f"  {_rebuild_hint(remaining, env_flag)}")
 
 
 @main.command(name="create-views")

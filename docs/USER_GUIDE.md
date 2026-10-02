@@ -14,7 +14,10 @@ Every command that talks to TM1 accepts `--env <name>` and `--config <path>`.
 | Command | Purpose |
 |---|---|
 | `tm1dd set-credential --name <entry>` | Store a password in the OS keyring |
-| `tm1dd bootstrap [--drop-legacy]` | Create every `}Meta_*` dimension and cube. Safe to re-run; existing objects are left untouched. `--drop-legacy` deletes cubes renamed in schema 1.6 |
+| `tm1dd bootstrap` | Create missing `}Meta_*` dimensions and cubes, and add missing elements (e.g. new measures) to existing ones. Never deletes anything |
+| `tm1dd bootstrap --check` | Read-only: report what is missing, outdated or needs a rebuild (see [Upgrading the schema](#upgrading-the-schema)) |
+| `tm1dd bootstrap --rebuild-cube <name> [--yes]` | Delete one tm1dd cube and create it again – only when `--check` says REBUILD |
+| `tm1dd bootstrap --drop-legacy` | Delete cubes renamed in schema 1.6 |
 | `tm1dd create-views [--prefix <text>]` | Create or replace public views on every `}Meta_*` cube (see [Saved views](#saved-views)) |
 | `tm1dd record-run --status <text>` | Write a test row to `}Meta_Extraction_Audit` to prove the write path |
 
@@ -43,8 +46,8 @@ Every command that talks to TM1 accepts `--env <name>` and `--config <path>`.
 ## Dry-run
 
 `dry_run: true` in `config.yaml` (the default in the template) makes every command read
-and report but clear and write nothing. Summaries show *(dry-run: not written)*. Use it
-on a new environment first, and on production whenever you only need the counts.
+and report but clear, delete and write nothing (`bootstrap --check` is read-only anyway). Summaries show *(dry-run: not written)*.
+Use it on a new environment first, and on production whenever you only need the counts.
 
 ---
 
@@ -64,6 +67,57 @@ Neither command touches the other's cubes, so they can run separately.
 
 ---
 
+## Upgrading the schema
+
+New releases sometimes add measures, dimensions or cubes. On an instance that is in use,
+with data and views built on the `}Meta_*` cubes, nothing should be deleted unless it has
+to be. The upgrade therefore always starts with a read-only check:
+
+```powershell
+tm1dd bootstrap --env prod --check
+```
+
+It compares every tm1dd dimension and cube with the current schema and lists anything that
+is not OK:
+
+| Status | Meaning | What fixes it |
+|---|---|---|
+| `missing` | The dimension or cube does not exist | `tm1dd bootstrap` creates it |
+| `outdated` | Elements are missing, e.g. a measure added by the release | `tm1dd bootstrap` adds them; data and views are kept |
+| `REBUILD` | Cannot be fixed in place: the cube's dimensions changed, or an element's type changed | `tm1dd bootstrap --rebuild-cube <name>` |
+
+`--check` ends with the exact commands to run. In most upgrades only `tm1dd bootstrap` is
+needed; it never deletes or changes existing data, elements or views. Extra elements that a
+newer schema no longer uses are left in place.
+
+### Rebuilding a cube (only when `--check` says REBUILD)
+
+```powershell
+tm1dd bootstrap --env prod --rebuild-cube "}Meta_Process_Datasource"
+```
+
+1. Lists the cube and the public views on it – TM1 deletes a cube's views with the cube.
+2. Asks for confirmation (`--yes` skips this for scripts).
+3. Deletes the cube, creates the whole schema up to date, and prints the refill commands.
+
+Only tm1dd cubes can be named; model cubes are refused. Name the option more than once to
+rebuild several cubes. If an element's type changed, its dimension is deleted and created
+again only when every tm1dd cube using it is being rebuilt in the same command – `--check`
+lists those cubes together. Dry-run lists what would be deleted and deletes nothing.
+
+Then refill:
+
+```powershell
+tm1dd extract --env prod
+tm1dd extract-rules --env prod
+tm1dd create-views --env prod
+```
+
+Re-create any of your own views that were listed in step 1. The audit cube is never
+rebuilt by accident: it is only touched if you name it.
+
+---
+
 ## Audit trail: `}Meta_Extraction_Audit`
 
 Every run of `extract` and `extract-rules` adds one element to `}Meta_ExtractionRun`,
@@ -76,7 +130,7 @@ named by its UTC end time (e.g. `2026-10-01T09:15:00Z`).
 | `ExitStatus` | `Success` or `CompletedWithFailures` |
 | `RunBy` | Windows user and TM1 user, e.g. `jsmith via TM1_SERVICE_USER` |
 | `Warnings` | e.g. how many objects failed |
-| Run metrics | Every count in the run summary, as its own measure (`CubeRows`, `MissingElements`, ...) |
+| Run metrics | Every count in the run summary, as its own measure (`CubeRows`, `MissingElements`, `DeadFeeders`, ...) |
 
 Run metrics are created on first use, so a new release can add metrics without a
 re-bootstrap. `extract` and `extract-rules` record different metrics; each run leaves the
@@ -88,7 +142,8 @@ other command's metrics empty. Comparing runs shows trends, e.g. a rise in
 ## Common workflows
 
 **"Which process loads this cube?"** – `}Meta_Process_Cube`, filter the cube, role
-`CubeWrite`. Then `}Meta_Process_Datasource` for where that process reads from.
+`CubeWrite` (view `tm1dd Cube Writers`). Then `}Meta_Process_Datasource` for where that
+process reads from.
 
 **"What breaks if I retire this process?"** – `}Meta_Process_Chain` with the process on
 the callee axis, and `}Meta_Process_Chore` for chores that run it.
@@ -97,8 +152,9 @@ the callee axis, and `}Meta_Process_Chore` for chores that run it.
 the element. Any row means a rule or feeder names it.
 
 **"What is broken right now?"** – `}Meta_Rule_Feeder_Finding` view `tm1dd Errors`,
-`}Meta_Rule_Element_Reference` with `ElementExists = No`, and `}Meta_Rule_Dependency` with `RelatedCubeExists = No`, and
-`}Meta_Process_Cube` with `CubeExists = No`.
+`}Meta_Rule_Element_Reference` with `ElementExists = No` (`tm1dd Broken References`),
+`}Meta_Rule_Dependency` with `RelatedCubeExists = No` (`tm1dd Dangling Cubes`), and
+`}Meta_Process_Cube` with `CubeExists = No` (`tm1dd Missing Cubes`).
 
 **"Why are some cube targets missing from the lineage?"** – `tm1dd diagnose-unresolved`,
 or `}Meta_Process_Unresolved`.
@@ -110,7 +166,9 @@ or `}Meta_Process_Unresolved`.
 `tm1dd create-views --env <name>` creates public MDX views on every `}Meta_*` cube, so
 everyone starts from the same views in PAfE, PAW or Architect. Every view name starts with
 `tm1dd` (change it with `--prefix`), so they sort together. Re-running replaces them, which
-is how they pick up changes after an upgrade. Cubes not yet bootstrapped are skipped.
+is how they pick up changes after an upgrade. Cubes not yet bootstrapped are skipped, and so
+are views that need an element which does not exist yet (for example `tm1dd Ambiguous`
+until an ambiguous reference is found) – re-run later to pick them up.
 
 Each view puts the cube's name dimensions on rows and all its measures on columns, with
 zero suppression, so only populated rows appear.
@@ -166,7 +224,8 @@ A daily or post-deployment run keeps the dictionary current and builds the audit
 | `Environment variable 'X' ... is not set` | A `*_env` field holds a value instead of a variable name. Use the literal field (`address:`) or set the variable |
 | `Required credential 'None' could not be resolved` | `password_env` is missing or blank for that environment |
 | Credential not found under a scheduled task | Store it with `set-credential` while logged in as the task's Windows user |
-| A new cube is missing after upgrading | Run `tm1dd bootstrap --env <name>` |
+| A new cube or measure is missing after upgrading | Run `tm1dd bootstrap --env <name>` |
+| An extraction fails writing to a `}Meta_*` cube after upgrading | Run `tm1dd bootstrap --env <name> --check` and follow what it says |
 | `tm1dd --version` shows the old version | Bump `__version__` in `__init__.py` as well as `pyproject.toml` |
 | Config edits seem ignored | Check the file on disk (`Get-Content config.yaml`) – the editor may not have saved |
-| Summary lists *Aliases not readable* | See [Rules analysis – Element lookup](RULES_ANALYSIS.md#how-elements-are-looked-up) |
+| Summary lists *Aliases not readable* | See [Rules analysis – How elements are looked up](RULES_ANALYSIS.md#how-elements-are-looked-up) |

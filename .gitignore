@@ -46,3 +46,7 @@ config.yaml
 #html files
 data_flow.html
 vis-network.min.js
+
+
+#releae files
+release/
