@@ -2,7 +2,7 @@
 
 Every object `tm1dd bootstrap` creates. All names start with `}Meta_`, so they sit with the
 other control objects and are hidden from normal users unless *Display Control Objects*
-is on. Schema version: **1.6**.
+is on. Schema version: **1.7**.
 
 Naming: every TI lineage cube starts `}Meta_Process_` and every rules cube starts
 `}Meta_Rule_`, so each group sorts together. The audit cube is `}Meta_Extraction_Audit`.
@@ -187,6 +187,25 @@ Written by `tm1dd extract-rules`. See [Rules analysis](RULES_ANALYSIS.md).
 | `FirstLine` | N | Line of the first statement using it |
 | `FirstStatement` | S | That statement (truncated) |
 | `Lines` | S | Every statement line using it |
+
+### `}Meta_Rule_Feeder_Finding` (2e)
+
+`}Meta_Cube` × `}Meta_RuleStatement` × `}Meta_RuleFeederFindingType` × `}Meta_RuleFeederFindingMeasure`
+
+| Element | Values |
+|---|---|
+| `}Meta_RuleStatement` | `Line 00001` … (statement start line), `Cube` |
+| `}Meta_RuleFeederFindingType` | `UnfedRule`, `DeadFeeder`, `FeederFeedsNoRule`, `FeedersWithoutSkipCheck`, `UncheckedRule` |
+
+| Measure | Type | Meaning |
+|---|---|---|
+| `Count` | N | Occurrences rolled into the row |
+| `Severity` | S | `Error`, `Warning` or `Info` |
+| `Section` | S | `Rules`, `Feeders` or `Cube` |
+| `Line` | N | Statement start line (0 for cube-level) |
+| `Statement` | S | The statement (truncated) |
+| `Detail` | S | Which target or element caused it |
+| `RelatedCube` | S | Target cube(s) for feeder findings |
 
 ---
 

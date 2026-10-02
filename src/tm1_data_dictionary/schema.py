@@ -125,6 +125,12 @@ DIM_RULE_ELEMENT_REF_TYPE = "}Meta_RuleElementRefType"
 DIM_RULE_ELEMENT_REF_MEASURE = "}Meta_RuleElementRefMeasure"
 CUBE_RULE_ELEMENT_REFERENCE = "}Meta_Rule_Element_Reference"
 
+# --- }Meta_Rule_Feeder_Finding (Phase 2e - rules) ---
+DIM_RULE_STATEMENT = "}Meta_RuleStatement"
+DIM_RULE_FEEDER_FINDING_TYPE = "}Meta_RuleFeederFindingType"
+DIM_RULE_FEEDER_FINDING_MEASURE = "}Meta_RuleFeederFindingMeasure"
+CUBE_RULE_FEEDER_FINDING = "}Meta_Rule_Feeder_Finding"
+
 # --- }Meta_Rule_Function (Phase 2d - rules) ---
 DIM_RULE_FUNCTION_MEASURE = "}Meta_RuleFunctionMeasure"
 CUBE_RULE_FUNCTION = "}Meta_Rule_Function"
@@ -274,6 +280,26 @@ RULE_FUNCTION_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("FirstLine", NUMERIC),  # rule-text line of the first statement using it
     ElementDef("FirstStatement", STRING),  # that statement (truncated)
     ElementDef("Lines", STRING),  # every statement line using it, comma-separated
+)
+
+# Kinds of feeder finding in }Meta_Rule_Feeder_Finding.
+RULE_FEEDER_FINDING_TYPE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("UnfedRule", STRING),  # leaf rule in a SKIPCHECK cube no feeder reaches
+    ElementDef("DeadFeeder", STRING),  # feeder target names a missing element or cube
+    ElementDef("FeederFeedsNoRule", STRING),  # feeder target overlaps no rule (over-feeding)
+    ElementDef("FeedersWithoutSkipCheck", STRING),  # feeders in a cube without SKIPCHECK
+    ElementDef("UncheckedRule", STRING),  # rule area could not be resolved
+)
+
+# Measures for }Meta_Rule_Feeder_Finding (one row per cube/statement/finding type).
+RULE_FEEDER_FINDING_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # occurrences rolled into the row
+    ElementDef("Severity", STRING),  # Error | Warning | Info
+    ElementDef("Section", STRING),  # Rules | Feeders | Cube
+    ElementDef("Line", NUMERIC),  # rule-text line of the statement (0 = cube level)
+    ElementDef("Statement", STRING),  # the statement (truncated)
+    ElementDef("Detail", STRING),  # what was found
+    ElementDef("RelatedCube", STRING),  # target cube(s) for feeder findings
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -562,6 +588,35 @@ def rule_function_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(cube_dim, function_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def rule_feeder_finding_schema() -> SchemaDef:
+    """Return the schema for }Meta_Rule_Feeder_Finding and its dimensions (Phase 2e).
+
+    Dimensioned }Meta_Cube x }Meta_RuleStatement x }Meta_RuleFeederFindingType x
+    }Meta_RuleFeederFindingMeasure.
+
+    Records feeder problems found by comparing rule areas with feeder targets across
+    cubes. }Meta_RuleStatement holds statement keys such as ``Line 00057`` (plus ``Cube``
+    for cube-level findings), shared by every cube.
+    """
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    statement_dim = DimensionDef(DIM_RULE_STATEMENT, (SEED_ELEMENT,))
+    type_dim = DimensionDef(DIM_RULE_FEEDER_FINDING_TYPE, RULE_FEEDER_FINDING_TYPE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_RULE_FEEDER_FINDING_MEASURE, RULE_FEEDER_FINDING_MEASURES)
+    cube = CubeDef(
+        CUBE_RULE_FEEDER_FINDING,
+        (
+            DIM_CUBE,
+            DIM_RULE_STATEMENT,
+            DIM_RULE_FEEDER_FINDING_TYPE,
+            DIM_RULE_FEEDER_FINDING_MEASURE,
+        ),
+    )
+    return SchemaDef(
+        dimensions=(cube_dim, statement_dim, type_dim, measure_dim),
         cubes=(cube,),
     )
 

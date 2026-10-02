@@ -24,9 +24,9 @@ tm1dd extract-rules --env dev --quiet
 | 2b | `}Meta_Rule_Dependency` | Which cubes do this cube's rules read from or feed into? Do they all exist? |
 | 2c | `}Meta_Rule_Element_Reference` | Which rules and feeders name this element? Does every named element exist? |
 | 2d | `}Meta_Rule_Function` | Which functions do this cube's rules use (hierarchy, attribute, lookup ...)? |
-| 2e | *planned* | Feeder-gap detection: rules with no feeder, feeders that feed nothing |
+| 2e | `}Meta_Rule_Feeder_Finding` | Which rules are not fed? Which feeders feed nothing, or feed cells no rule calculates? |
 
-All four cubes are rebuilt from one read of each cube's rule text. Full measure lists are
+All five cubes are rebuilt from one read of each cube's rule text. Full measure lists are
 in the [schema reference](SCHEMA_REFERENCE.md#rules-cubes).
 
 ---
@@ -178,6 +178,56 @@ and `Lines` (every statement line using it).
 
 ---
 
+## 2e – Feeder gaps: `}Meta_Rule_Feeder_Finding`
+
+With SKIPCHECK, TM1 only calculates a rule cell if it is *fed*. A missing feeder makes
+values silently disappear; a feeder aimed at the wrong place, or at cells no rule
+calculates, wastes memory and slows the server (over-feeding). Phase 2e compares every
+rule's area with every feeder's target, across cubes.
+
+| Finding | Severity | Meaning | What to do |
+|---|---|---|---|
+| `UnfedRule` | Warning | A leaf-level rule in a SKIPCHECK cube that no feeder statement can reach | Add a feeder, or confirm the cells are fed some other way |
+| `DeadFeeder` | Error | A feeder target names an element or cube that does not exist, so it feeds nothing | Fix the element or cube name |
+| `FeederFeedsNoRule` | Warning | A feeder target overlaps no rule in the target cube | Remove the feeder or point it at the rule it was meant for |
+| `FeedersWithoutSkipCheck` | Info | The cube has feeders but no SKIPCHECK, so they do nothing | Add SKIPCHECK or remove the feeders |
+| `UncheckedRule` | Info | The rule's area names an element that could not be resolved | See `}Meta_Rule_Element_Reference` for that rule |
+
+One row per (cube, statement, finding type). `}Meta_RuleStatement` holds keys such as
+`Line 00057`, so rows sort in rule-text order; cube-level findings use `Cube`. Measures:
+`Count`, `Severity`, `Section`, `Line`, `Statement`, `Detail` (which target or element) and
+`RelatedCube`.
+
+### How the comparison works
+
+- An area becomes "these elements in these dimensions"; dimensions not named are
+  unrestricted. Elements are resolved with the same lookup as 2c, so aliases work.
+- A feeder target `[...]` keeps the source area and replaces only the dimensions it names:
+  `['Local','Salaries'] => ['Payroll Taxes']` feeds Local / Payroll Taxes.
+- A target `DB('Cube', ...)` restricts each dimension whose argument is a literal. `!Dim`
+  and expressions are unrestricted.
+- Two areas overlap if, in every dimension both restrict, some pair of elements is the same
+  or one is an ancestor of the other. Feeding a consolidation feeds every leaf beneath it.
+  Each dimension's hierarchy is read once per run.
+
+### What is not reported
+
+- Rules with `C:` or `S:`, rules that are just `STET`, and unqualified rules on
+  consolidations only – these do not need feeders.
+- Rules in cubes without SKIPCHECK – nothing needs feeding.
+- Feeders into a cube that was not read (excluded), and feeders whose target cube is an
+  expression. The latter are counted in the summary, and `UnfedRule` details say so when any
+  exist, because such a feeder may be the one that feeds the rule.
+
+### Reading the results
+
+`UnfedRule` means no feeder *statement* can reach the area – not that every cell is empty.
+Input cells and cells fed by a dynamic-target feeder still show. Treat it as "check this",
+and `DeadFeeder` as "fix this". Elements that cannot be placed are treated as unrestricted,
+so the check only reports clear gaps.
+
+---
+
 ## Exclusions
 
 By default only control cubes (`}*`) are excluded – real business cubes are never assumed
@@ -200,6 +250,8 @@ excluded control cube resolves correctly.
 | Element references; missing / ambiguous / not checked | From 2c |
 | Dimensions read; elements resolved by TM1 lookup | Element lookup health |
 | Function uses (distinct functions); cubes using hierarchy functions | From 2d |
+| Feeder check: rules, feeders; findings by type; dynamic-target feeders | From 2e |
+| Hierarchies read; hierarchies not readable | Feeder-check health |
 | Aliases not readable | Only shown when an alias read failed |
 | Malformed statements | Only shown when a statement's shape was not recognised |
 
@@ -213,5 +265,5 @@ The same counts are stored in `}Meta_Extraction_Audit` for each run.
   alternate hierarchy is reported as missing.
 - Rule areas that use `CONTINUE` chains or overlapping areas are recorded as written; the
   tool does not work out which rule wins for a given cell.
-- Feeder coverage (rules without feeders, overfeeding) is not analysed yet – that is
-  Phase 2e.
+- Feeder checks are static: they cannot see cell values, conditional feeders' runtime
+  behaviour, or which rule wins where areas overlap.

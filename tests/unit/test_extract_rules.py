@@ -12,6 +12,7 @@ import pytest
 
 from tm1_data_dictionary import extract_rules as mod
 from tm1_data_dictionary.element_index import ElementIndex
+from tm1_data_dictionary.hierarchy_index import HierarchyIndex
 from tm1_data_dictionary.rule_exclusions import RuleExclusionRules
 
 GL_RULES = """SKIPCHECK;
@@ -105,6 +106,7 @@ def written(monkeypatch: pytest.MonkeyPatch) -> dict:
         "dependency": [],
         "element": [],
         "function": [],
+        "feeder": [],
     }
 
     def _clear(name: str):  # noqa: ANN202
@@ -125,11 +127,18 @@ def written(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(mod, "write_rule_element_references", _writer("element"))
     monkeypatch.setattr(mod, "clear_rule_function", _clear("function"))
     monkeypatch.setattr(mod, "write_rule_functions", _writer("function"))
+    monkeypatch.setattr(mod, "clear_rule_feeder_finding", _clear("feeder"))
+    monkeypatch.setattr(mod, "write_rule_feeder_findings", _writer("feeder"))
     return state
 
 
 def _run(client: _FakeClient, **kwargs):  # noqa: ANN003, ANN202
-    return mod.extract_all_rules(client, element_index=ElementIndex(_loader), **kwargs)
+    return mod.extract_all_rules(
+        client,
+        element_index=ElementIndex(_loader),
+        hierarchy_index=HierarchyIndex(lambda _d: []),
+        **kwargs,
+    )
 
 
 def _element_rows(written: dict) -> list:
@@ -149,9 +158,23 @@ def test_counts_and_exclusions(written: dict) -> None:
 
 def test_all_cubes_cleared_and_written_once(written: dict) -> None:
     _run(_FakeClient())
-    assert written["cleared"] == ["rule_cube", "dependency", "element", "function"]
-    keys = ("rule_cube", "dependency", "element", "function")
-    assert [len(written[k]) for k in keys] == [1, 1, 1, 1]
+    assert written["cleared"] == ["rule_cube", "dependency", "element", "function", "feeder"]
+    keys = ("rule_cube", "dependency", "element", "function", "feeder")
+    assert [len(written[k]) for k in keys] == [1, 1, 1, 1, 1]
+
+
+def test_feeder_findings(written: dict) -> None:
+    summary = _run(_FakeClient())
+    rows = {(r.statement_key, r.finding_type.value): r for r in written["feeder"][0]}
+    # The only feeder targets the missing element 'Ghost', so it feeds nothing ...
+    dead = rows[("Line 00008", "DeadFeeder")]
+    assert "Ghost" in dead.detail_text()
+    # ... which leaves every leaf rule in this SKIPCHECK cube unfed.
+    unfed = sorted(k for k, t in rows if t == "UnfedRule")
+    assert unfed == ["Line 00002", "Line 00004", "Line 00005", "Line 00006"]
+    assert summary.dead_feeders == 1
+    assert summary.unfed_rules == 4
+    assert summary.feeders_checked == 1
 
 
 def test_function_usage(written: dict) -> None:
@@ -226,6 +249,8 @@ def test_dry_run_reads_and_writes_nothing(written: dict) -> None:
     assert written["cleared"] == []
     assert written["element"] == []
     assert written["function"] == []
+    assert written["feeder"] == []
+    assert summary.feeder_finding_rows_written == 5
     assert summary.element_reference_rows_written > 0
     assert summary.rule_function_rows_written == 2
     assert summary.rule_dependency_rows_written == 3
@@ -278,6 +303,9 @@ def test_summary_lines(written: dict) -> None:
     assert "Element-reference rows" in text
     assert "Rule-function rows" in text
     assert "Cubes using hierarchy functions" in text
+    assert "Feeder findings - unfed rules: 4" in text
+    summary.failed_hierarchies = {"Account": "RuntimeError: no access"}
+    assert "Hierarchies not readable" in "\n".join(summary.as_lines())
     assert "Element rows - missing element: 1" in text
     assert "Aliases not readable" in text
     assert "Version - New Alias" in text

@@ -96,8 +96,8 @@ the callee axis, and `}Meta_Process_Chore` for chores that run it.
 **"Is this element safe to rename or delete?"** – `}Meta_Rule_Element_Reference`, filter
 the element. Any row means a rule or feeder names it.
 
-**"What is broken right now?"** – `}Meta_Rule_Element_Reference` with
-`ElementExists = No`, and `}Meta_Rule_Dependency` with `RelatedCubeExists = No`, and
+**"What is broken right now?"** – `}Meta_Rule_Feeder_Finding` view `tm1dd Errors`,
+`}Meta_Rule_Element_Reference` with `ElementExists = No`, and `}Meta_Rule_Dependency` with `RelatedCubeExists = No`, and
 `}Meta_Process_Cube` with `CubeExists = No`.
 
 **"Why are some cube targets missing from the lineage?"** – `tm1dd diagnose-unresolved`,
@@ -135,6 +135,10 @@ Every cube has `tm1dd All`, which shows every row.
 | `}Meta_Rule_Element_Reference` | `tm1dd Not Checked` | References that could not be checked |
 | `}Meta_Rule_Element_Reference` | `tm1dd Ambiguous` | Elements found in more than one dimension |
 | `}Meta_Rule_Element_Reference` | `tm1dd Feeder Targets` | Every element a feeder feeds |
+| `}Meta_Rule_Feeder_Finding` | `tm1dd Errors` | Feeder findings with severity Error |
+| `}Meta_Rule_Feeder_Finding` | `tm1dd Unfed Rules` | Leaf rules no feeder can reach |
+| `}Meta_Rule_Feeder_Finding` | `tm1dd Dead Feeders` | Feeders whose target does not exist |
+| `}Meta_Rule_Feeder_Finding` | `tm1dd Over-feeding` | Feeders whose target overlaps no rule |
 | `}Meta_Rule_Function` | `tm1dd Hierarchy Functions` | Rules affected by hierarchy changes |
 | `}Meta_Rule_Function` | `tm1dd Attribute Functions` | Rules affected by attribute renames |
 

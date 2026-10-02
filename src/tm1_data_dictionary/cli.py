@@ -43,6 +43,7 @@ from tm1_data_dictionary.schema import (
     rule_cube_schema,
     rule_dependency_schema,
     rule_element_reference_schema,
+    rule_feeder_finding_schema,
     rule_function_schema,
     unresolved_reference_schema,
 )
@@ -52,7 +53,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.6"
+SCHEMA_VERSION = "1.7"
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +182,7 @@ def bootstrap(config_path: str, environment: str | None, drop_legacy: bool) -> N
         rule_dependency_schema(),
         rule_element_reference_schema(),
         rule_function_schema(),
+        rule_feeder_finding_schema(),
     )
     try:
         with TM1Client(cfg) as client:
@@ -661,6 +663,9 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
     Phase 2d: every function and keyword (STET, CONTINUE, ISLEAF) used in rules and
     feeders, with a category, into }Meta_Rule_Function.
 
+    Phase 2e: feeder gaps - unfed rules, dead feeders and feeders that feed no rule -
+    into }Meta_Rule_Feeder_Finding.
+
     Applies the rule exclusion list (control cubes by default). One unreadable cube does
     not abort the run. Records the run into }Meta_Extraction_Audit. Honours dry-run mode.
 
@@ -721,6 +726,13 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
                             "cubes_using_hierarchy_functions": (
                                 summary.cubes_using_hierarchy_functions
                             ),
+                            "feeder_finding_rows": summary.feeder_finding_rows_written,
+                            "unfed_rules": summary.unfed_rules,
+                            "dead_feeders": summary.dead_feeders,
+                            "feeders_feeding_no_rule": summary.feeders_feeding_no_rule,
+                            "feeders_without_skipcheck": summary.feeders_without_skipcheck,
+                            "unchecked_rules": summary.unchecked_rules,
+                            "dynamic_feeder_targets": summary.dynamic_feeder_targets,
                         },
                     )
                     audit_recorded = True

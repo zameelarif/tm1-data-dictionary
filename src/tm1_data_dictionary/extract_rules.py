@@ -7,9 +7,8 @@ and rolled up into every rule fact:
 - Phase 2b - cross-cube DB() dependencies into }Meta_Rule_Dependency.
 - Phase 2c - literal element references into }Meta_Rule_Element_Reference.
 - Phase 2d - function and keyword usage into }Meta_Rule_Function.
-
-Later phases (feeder gaps) extend this orchestrator the same way,
-reusing the same parsed rule text.
+- Phase 2e - feeder gaps (unfed rules, dead feeders, over-feeding) into
+  }Meta_Rule_Feeder_Finding.
 
 Design principles (unchanged from the TI orchestrator):
 
@@ -32,6 +31,7 @@ from tm1_data_dictionary.element_index import (
     tm1_element_loader,
     tm1_element_resolver,
 )
+from tm1_data_dictionary.hierarchy_index import HierarchyIndex, tm1_edge_loader
 from tm1_data_dictionary.parser.rules.rule_dependencies import (
     RuleDependency,
     extract_dependencies,
@@ -42,13 +42,14 @@ from tm1_data_dictionary.parser.rules.rule_element_references import (
     extract_element_references,
     rollup_element_references,
 )
+from tm1_data_dictionary.parser.rules.rule_feeders import FindingType, analyze_feeders
 from tm1_data_dictionary.parser.rules.rule_functions import (
     CAT_HIERARCHY,
     RuleFunctionCall,
     extract_function_calls,
     rollup_function_calls,
 )
-from tm1_data_dictionary.parser.rules.rule_text import parse_rule_text
+from tm1_data_dictionary.parser.rules.rule_text import ParsedRuleText, parse_rule_text
 from tm1_data_dictionary.rule_exclusions import RuleExclusionRules, partition
 from tm1_data_dictionary.rule_reader import CubeRuleInfo, RuleReader
 from tm1_data_dictionary.tm1_client import TM1Client
@@ -63,6 +64,10 @@ from tm1_data_dictionary.writers.rule_dependency_writer import (
 from tm1_data_dictionary.writers.rule_element_reference_writer import (
     clear_rule_element_reference,
     write_rule_element_references,
+)
+from tm1_data_dictionary.writers.rule_feeder_writer import (
+    clear_rule_feeder_finding,
+    write_rule_feeder_findings,
 )
 from tm1_data_dictionary.writers.rule_function_writer import (
     clear_rule_function,
@@ -87,6 +92,7 @@ class RuleExtractionSummary:
     rule_dependency_rows_written: int = 0
     element_reference_rows_written: int = 0
     rule_function_rows_written: int = 0
+    feeder_finding_rows_written: int = 0
     cubes_with_rules: int = 0
     cubes_with_feeders: int = 0
     cubes_with_skipcheck: int = 0
@@ -102,6 +108,16 @@ class RuleExtractionSummary:
     function_uses: int = 0  # every function/keyword use in rules and feeders
     distinct_functions: int = 0
     cubes_using_hierarchy_functions: int = 0
+    rules_checked_for_feeders: int = 0
+    feeders_checked: int = 0
+    unfed_rules: int = 0
+    dead_feeders: int = 0
+    feeders_feeding_no_rule: int = 0
+    feeders_without_skipcheck: int = 0
+    unchecked_rules: int = 0
+    dynamic_feeder_targets: int = 0
+    hierarchies_read: int = 0
+    failed_hierarchies: dict[str, str] = field(default_factory=dict)
     resolved_by_tm1: int = 0  # elements found only by asking TM1 (MDX fallback)
     fallback_limit_reached: bool = False
     excluded_names: list[str] = field(default_factory=list)
@@ -124,6 +140,7 @@ class RuleExtractionSummary:
             f"Rule-dependency rows: {self.rule_dependency_rows_written}{written_suffix}",
             f"Element-reference rows: {self.element_reference_rows_written}{written_suffix}",
             f"Rule-function rows: {self.rule_function_rows_written}{written_suffix}",
+            f"Feeder-finding rows: {self.feeder_finding_rows_written}{written_suffix}",
             f"Cubes with rules: {self.cubes_with_rules}",
             f"Cubes with feeders: {self.cubes_with_feeders}",
             f"Cubes with SKIPCHECK: {self.cubes_with_skipcheck}",
@@ -141,6 +158,18 @@ class RuleExtractionSummary:
                 f"({self.distinct_functions} distinct functions)"
             ),
             f"Cubes using hierarchy functions: {self.cubes_using_hierarchy_functions}",
+            (
+                f"Feeder check: {self.rules_checked_for_feeders} rules, "
+                f"{self.feeders_checked} feeders"
+            ),
+            f"Feeder findings - unfed rules: {self.unfed_rules}",
+            f"Feeder findings - dead feeders: {self.dead_feeders}",
+            f"Feeder findings - feeders feeding no rule: {self.feeders_feeding_no_rule}",
+            f"Feeder findings - cubes with feeders but no SKIPCHECK: "
+            f"{self.feeders_without_skipcheck}",
+            f"Feeder findings - rules not checked: {self.unchecked_rules}",
+            f"Feeders with a dynamic target cube (not checked): {self.dynamic_feeder_targets}",
+            f"Hierarchies read for feeder checks: {self.hierarchies_read}",
         ]
         if self.fallback_limit_reached:
             lines.append(
@@ -156,6 +185,9 @@ class RuleExtractionSummary:
             lines.append("Aliases not readable (elements may be falsely reported missing):")
             for name, errors in self.alias_errors.items():
                 lines.extend(f"  {name} - {error}" for error in errors)
+        if self.failed_hierarchies:
+            lines.append("Hierarchies not readable (ancestry ignored for these):")
+            lines.extend(f"  {name}: {error}" for name, error in self.failed_hierarchies.items())
         if self.failed_names:
             lines.append("Failures:")
             lines.extend(f"  {name}: {error}" for name, error in self.failed_names)
@@ -200,14 +232,17 @@ def extract_all_rules(
     rules: RuleExclusionRules | None = None,
     progress: RuleProgressFn | None = None,
     element_index: ElementIndex | None = None,
+    hierarchy_index: HierarchyIndex | None = None,
 ) -> RuleExtractionSummary:
     """Extract rule facts for every included cube in the instance.
 
-    ``element_index`` can be injected for tests; by default dimensions are read via TM1py.
+    ``element_index`` and ``hierarchy_index`` can be injected for tests; by default
+    dimensions and hierarchies are read via TM1.
     """
     rules = rules or RuleExclusionRules.default()
     reader = RuleReader(client)
     index = element_index or ElementIndex(tm1_element_loader(client), tm1_element_resolver(client))
+    hierarchy = hierarchy_index or HierarchyIndex(tm1_edge_loader(client))
     summary = RuleExtractionSummary(dry_run=client.dry_run)
 
     all_cube_names = reader.list_cube_names()
@@ -223,11 +258,13 @@ def extract_all_rules(
         clear_rule_dependency(client)
         clear_rule_element_reference(client)
         clear_rule_function(client)
+        clear_rule_feeder_finding(client)
 
     cube_rows: list[CubeRuleInfo] = []
     all_dependencies: list[RuleDependency] = []
     all_element_refs: list[ElementReference] = []
     all_function_calls: list[RuleFunctionCall] = []
+    parsed_by_cube: dict[str, ParsedRuleText] = {}
     total_included = len(partition_result.included)
 
     for index_no, cube_name in enumerate(partition_result.included, start=1):
@@ -242,6 +279,7 @@ def extract_all_rules(
                 if info.skipcheck:
                     summary.cubes_with_skipcheck += 1
                 parsed = parse_rule_text(info.raw_rule_text)
+                parsed_by_cube[info.name] = parsed
                 dependencies = extract_dependencies(info.name, parsed)
                 element_refs = extract_element_references(info.name, parsed)
                 all_dependencies.extend(dependencies)
@@ -295,15 +333,33 @@ def extract_all_rules(
         {row.cube for row in function_rows if row.category == CAT_HIERARCHY}
     )
 
+    # Phase 2e: feeder gaps, comparing every rule with every feeder across cubes.
+    feeders = analyze_feeders(
+        cube_rows, parsed_by_cube, cube_dimensions, all_cube_names, index, hierarchy
+    )
+    finding_rows = feeders.findings
+    summary.rules_checked_for_feeders = feeders.rules_checked
+    summary.feeders_checked = feeders.feeders_checked
+    summary.unfed_rules = feeders.count(FindingType.UNFED_RULE)
+    summary.dead_feeders = feeders.count(FindingType.DEAD_FEEDER)
+    summary.feeders_feeding_no_rule = feeders.count(FindingType.FEEDER_FEEDS_NO_RULE)
+    summary.feeders_without_skipcheck = feeders.count(FindingType.FEEDERS_WITHOUT_SKIPCHECK)
+    summary.unchecked_rules = feeders.count(FindingType.UNCHECKED_RULE)
+    summary.dynamic_feeder_targets = feeders.dynamic_feeder_targets
+    summary.hierarchies_read = hierarchy.dimensions_loaded
+    summary.failed_hierarchies = hierarchy.failed_dimensions
+
     if client.dry_run:
         summary.rule_cube_rows_written = len(cube_rows)
         summary.rule_dependency_rows_written = len(dependency_rows)
         summary.element_reference_rows_written = len(element_rows)
         summary.rule_function_rows_written = len(function_rows)
+        summary.feeder_finding_rows_written = len(finding_rows)
         return summary
 
     summary.rule_cube_rows_written = write_rule_cube(client, cube_rows)
     summary.rule_dependency_rows_written = write_rule_dependencies(client, dependency_rows)
     summary.element_reference_rows_written = write_rule_element_references(client, element_rows)
     summary.rule_function_rows_written = write_rule_functions(client, function_rows)
+    summary.feeder_finding_rows_written = write_rule_feeder_findings(client, finding_rows)
     return summary

@@ -53,6 +53,7 @@ _SCHEMAS = (
     s.rule_dependency_schema,
     s.rule_element_reference_schema,
     s.rule_function_schema,
+    s.rule_feeder_finding_schema,
 )
 CUBE_DIMENSIONS: dict[str, tuple[str, ...]] = {
     cube.name: cube.dimensions for build in _SCHEMAS for cube in build().cubes
@@ -70,6 +71,7 @@ ANCHOR_MEASURE: dict[str, str] = {
     s.CUBE_RULE_DEPENDENCY: "Count",
     s.CUBE_RULE_ELEMENT_REFERENCE: "Count",
     s.CUBE_RULE_FUNCTION: "Count",
+    s.CUBE_RULE_FEEDER_FINDING: "Count",
 }
 
 ALL = "All"
@@ -93,6 +95,7 @@ VIEWS: tuple[ViewDef, ...] = (
     _default(s.CUBE_RULE_DEPENDENCY, "rule DB() dependencies"),
     _default(s.CUBE_RULE_ELEMENT_REFERENCE, "element references in rules"),
     _default(s.CUBE_RULE_FUNCTION, "rule function usage"),
+    _default(s.CUBE_RULE_FEEDER_FINDING, "feeder findings"),
     # ---- TI case views ---------------------------------------------------------------
     ViewDef(
         s.CUBE_PROCESS_CUBE,
@@ -166,6 +169,30 @@ VIEWS: tuple[ViewDef, ...] = (
         "Feeder Targets",
         "Every element a feeder feeds",
         pin=((s.DIM_RULE_ELEMENT_REF_TYPE, "FeederTarget"),),
+    ),
+    ViewDef(
+        s.CUBE_RULE_FEEDER_FINDING,
+        "Errors",
+        "Feeder findings with severity Error",
+        where=("Severity", "Error"),
+    ),
+    ViewDef(
+        s.CUBE_RULE_FEEDER_FINDING,
+        "Unfed Rules",
+        "Leaf rules in SKIPCHECK cubes that no feeder can reach",
+        pin=((s.DIM_RULE_FEEDER_FINDING_TYPE, "UnfedRule"),),
+    ),
+    ViewDef(
+        s.CUBE_RULE_FEEDER_FINDING,
+        "Dead Feeders",
+        "Feeders whose target names a missing element or cube",
+        pin=((s.DIM_RULE_FEEDER_FINDING_TYPE, "DeadFeeder"),),
+    ),
+    ViewDef(
+        s.CUBE_RULE_FEEDER_FINDING,
+        "Over-feeding",
+        "Feeders whose target overlaps no rule",
+        pin=((s.DIM_RULE_FEEDER_FINDING_TYPE, "FeederFeedsNoRule"),),
     ),
     ViewDef(
         s.CUBE_RULE_FUNCTION,
