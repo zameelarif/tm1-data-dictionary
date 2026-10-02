@@ -27,6 +27,7 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.env_check import run_checks
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
 from tm1_data_dictionary.extract_rules import extract_all_rules
@@ -101,11 +102,21 @@ def main() -> None:
 
 
 @main.command()
-def check() -> None:
-    """Run the environment diagnostic."""
-    from scripts.check_environment import main as check_main  # noqa: PLC0415
+@_config_option
+@_env_option
+def check(config_path: str, environment: str | None) -> None:
+    """Check Python, config, the TM1 connection and write permission.
 
-    check_main()
+    The write test creates and deletes a scratch dimension (}Meta_ConnCheck_Scratch);
+    it is skipped in dry-run mode.
+    """
+    results = run_checks(Path(config_path), environment)
+    for result in results:
+        click.echo(f"  {result.status}  {result.name:<16} {result.detail}")
+    failed = [r for r in results if not r.ok]
+    if failed:
+        raise click.ClickException(f"{len(failed)} check(s) failed. Fix and re-run.")
+    click.echo("All checks passed.")
 
 
 @main.command(name="set-credential")

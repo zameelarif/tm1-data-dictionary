@@ -1,4 +1,4 @@
-"""N:/C: continuations must not count the shared area twice (Phase 2c, release 0.2.2)."""
+"""N:/C: continuations must not count the shared area twice (Phase 2c)."""
 
 from __future__ import annotations
 
