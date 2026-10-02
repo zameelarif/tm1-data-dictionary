@@ -24,6 +24,11 @@ Extraction (:func:`extract_element_references`) is pure text work. Resolution
   dimension; more than one is flagged **ambiguous** rather than guessed; none means the
   element does not exist.
 
+Rules with more than one level part (``['x'] = N: ...; C: ...;``) name their area once.
+The second part is a *continuation* (see :mod:`rule_text`): its own expression, DB() and
+comparison references are recorded, but its inherited area is not, so area elements are
+counted once per rule, not once per part.
+
 Only plain string literals are recorded. Arguments that are expressions (``!Version``,
 ``ATTRS(...)``, nested ``DB(...)``) are skipped - the same "never guess" principle as
 unresolved TI references and dynamic ``DB()`` cube names.
@@ -273,7 +278,11 @@ def extract_element_references(cube: str, parsed: ParsedRuleText) -> list[Elemen
         st = rule.statement
         statement = _truncate(st.text)
         if rule.well_formed:
-            refs.extend(_area_refs(cube, rule.area, ReferenceType.AREA, st.line_no, statement))
+            if not rule.continuation:
+                # A continuation (e.g. the C: part of an N:/C: rule) shares the area of
+                # the rule before it. That area was recorded once already; recording it
+                # again would double-count its elements.
+                refs.extend(_area_refs(cube, rule.area, ReferenceType.AREA, st.line_no, statement))
             for area in find_bracket_areas(rule.expression):
                 refs.extend(
                     _area_refs(cube, area, ReferenceType.RULE_REFERENCE, st.line_no, statement)

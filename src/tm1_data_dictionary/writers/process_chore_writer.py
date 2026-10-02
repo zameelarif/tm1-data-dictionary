@@ -1,4 +1,4 @@
-﻿"""Write chore -> process schedules into the ``}Meta_Process_Chore`` cube.
+"""Write chore -> process schedules into the ``}Meta_Process_Chore`` cube.
 
 Consumes :class:`~tm1_data_dictionary.chore_reader.ChoreTaskRow`s and writes them into
 ``}Meta_Process_Chore``, so a developer can slice *"what does this chore run, and in what
@@ -15,18 +15,16 @@ Measures per (chore, process):
 
 Guarded by ``ensure_writable`` (dry-run safe); TM1py imported lazily; element creation is
 idempotent. Mirrors the other writers.
+
+Cube, dimension and element-type names are imported from :mod:`tm1_data_dictionary.schema`,
+the single source of truth, so a rename there cannot leave this writer on an old cube.
 """
 
 from __future__ import annotations
 
 from tm1_data_dictionary.chore_reader import ChoreTaskRow
+from tm1_data_dictionary.schema import CUBE_CHORE_PROCESS, DIM_CHORE, DIM_PROCESS, STRING
 from tm1_data_dictionary.tm1_client import TM1Client
-
-DIM_CHORE = "}Meta_Chore"
-DIM_PROCESS = "}Meta_Process"
-CUBE_CHORE_PROCESS = "}Meta_Process_Chore"
-
-STRING = "String"
 
 
 def _load_element_class():  # noqa: ANN202
