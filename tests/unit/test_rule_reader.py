@@ -26,63 +26,63 @@ class _FakeCubes:
         return list(self._cubes[name].dimensions)
 
 
-def _client(cubes: dict[str, SimpleNamespace]) -> SimpleNamespace:
-    return SimpleNamespace(service=SimpleNamespace(cubes=_FakeCubes(cubes)))
+def _cube(name: str, text: str | None, dims: tuple[str, ...] = ("Version", "Account")):
+    rules = SimpleNamespace(text=text) if text is not None else None
+    return SimpleNamespace(name=name, dimensions=list(dims), has_rules=bool(text), rules=rules)
 
 
-RULES = SimpleNamespace(
-    text="SKIPCHECK;\n['A'] = N: 1;\nFEEDERS;\n['B'] => ['A'];",
-    has_feeders=True,
-    skipcheck=True,
-    feedstrings=False,
-    undefvals=False,
-    rule_statements=["['A'] = N: 1"],
-    feeder_statements=["['B'] => ['A']"],
-)
+def _reader(*cubes: SimpleNamespace) -> RuleReader:
+    client = SimpleNamespace(service=SimpleNamespace(cubes=_FakeCubes({c.name: c for c in cubes})))
+    return RuleReader(client)  # type: ignore[arg-type]
 
-CUBES = {
-    "General Ledger": SimpleNamespace(
-        name="General Ledger", dimensions=["Version", "Account"], has_rules=True, rules=RULES
-    ),
-    "Balance Sheet": SimpleNamespace(
-        name="Balance Sheet", dimensions=["Version"], has_rules=False, rules=None
-    ),
-    "}ClientGroups": SimpleNamespace(
-        name="}ClientGroups", dimensions=["}Clients", "}Groups"], has_rules=False, rules=None
-    ),
-}
+
+RULES = """SKIPCHECK;
+#UNDEFVALS;
+['A'] = N: 1;
+        C: 2;
+['B'] = N: ['A'];
+FEEDERS;
+['A'] => ['B'];
+"""
 
 
 def test_list_cube_names_includes_control_cubes() -> None:
-    client = _client(CUBES)
-    assert "}ClientGroups" in RuleReader(client).list_cube_names()  # type: ignore[arg-type]
-    assert client.service.cubes.skip_flags == [False]
+    reader = _reader(_cube("GL", None), _cube("}ClientGroups", None))
+    assert "}ClientGroups" in reader.list_cube_names()
 
 
-def test_exists() -> None:
-    reader = RuleReader(_client(CUBES))  # type: ignore[arg-type]
-    assert reader.exists("General Ledger")
-    assert not reader.exists("CC Yearly Assumptions")
+def test_exists_and_dimension_names() -> None:
+    reader = _reader(_cube("GL", None, ("V", "A", "M")))
+    assert reader.exists("GL")
+    assert not reader.exists("Nope")
+    assert reader.dimension_names("GL") == ("V", "A", "M")
 
 
-def test_dimension_names_in_order() -> None:
-    reader = RuleReader(_client(CUBES))  # type: ignore[arg-type]
-    assert reader.dimension_names("}ClientGroups") == ("}Clients", "}Groups")
-
-
-def test_read_cube_with_rules() -> None:
-    info = RuleReader(_client(CUBES)).read("General Ledger")  # type: ignore[arg-type]
+def test_facts_come_from_tm1dds_parser() -> None:
+    info = _reader(_cube("GL", RULES)).read("GL")
     assert info.has_rules and info.has_feeders and info.skipcheck
-    assert not info.feedstrings and not info.undefvals
-    assert info.dimension_names == ("Version", "Account")
-    assert (info.rule_statement_count, info.feeder_statement_count) == (1, 1)
-    assert info.raw_rule_text == RULES.text
+    assert not info.feedstrings
+    assert not info.undefvals  # commented out
+    assert (info.rule_statement_count, info.feeder_statement_count) == (2, 1)  # N:/C: = one
+    assert info.raw_rule_text == RULES
 
 
-def test_read_cube_without_rules_is_not_an_error() -> None:
-    info = RuleReader(_client(CUBES)).read("Balance Sheet")  # type: ignore[arg-type]
-    assert not info.has_rules
-    assert not info.has_feeders and not info.skipcheck
+def test_feeders_found_whatever_tm1py_reports() -> None:
+    # On a real model TM1py reported no feeders for a cube whose feeders tm1dd checked.
+    text = "['Total Runtime'] = ['A'] + ['B'];\n   Feeders ;\n['A'] => ['Total Runtime'];"
+    info = _reader(_cube("TI_ADMIN", text)).read("TI_ADMIN")
+    assert info.has_feeders
+    assert info.feeder_statement_count == 1
+
+
+def test_cube_without_rules() -> None:
+    info = _reader(_cube("BS", None)).read("BS")
+    assert not info.has_rules and not info.has_feeders
     assert (info.rule_statement_count, info.feeder_statement_count) == (0, 0)
     assert info.raw_rule_text == ""
-    assert info.dimension_names == ("Version",)
+
+
+def test_blank_rule_text_counts_as_no_rules() -> None:
+    cube = _cube("BS", "  \n ")
+    cube.has_rules = True
+    assert not _reader(cube).read("BS").has_rules

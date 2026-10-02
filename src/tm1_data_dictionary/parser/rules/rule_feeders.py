@@ -11,8 +11,9 @@ across cubes - and reports:
   exist.
 - ``FeederFeedsNoRule`` (Warning) - a feeder whose target overlaps no rule in the target
   cube (over-feeding).
-- ``FeedersWithoutSkipCheck`` (Info) - a cube with feeders but no SKIPCHECK; the feeders do
-  nothing.
+- ``FeedersWithoutSkipCheck`` (Info) - feeders that target their own cube, in a cube
+  without SKIPCHECK; those feeders do nothing. Feeders into *other* cubes are not counted:
+  whether they matter depends on the target cube, not the source.
 - ``UncheckedRule`` (Info) - a rule whose area could not be resolved, so it was not checked.
 
 How areas are compared
@@ -27,6 +28,14 @@ other expression cannot be resolved and is counted as a dynamic target. Two area
 *overlap* if, in every dimension both restrict, some pair of elements is the same or one
 is an ancestor of the other (feeding a consolidation feeds every leaf beneath it).
 
+Rules that need no feeder
+-------------------------
+- ``C:`` and ``S:`` rules (unless FEEDSTRINGS), and unqualified rules on consolidations
+  only.
+- Rules whose every possible result is ``0``, ``STET`` or ``CONTINUE`` - for example
+  ``['x%'] = 0`` or ``IF(cond, 0, CONTINUE)``, following nested ``IF`` branches. A zero
+  never needs to show, and STET/CONTINUE hand the cell to input or another rule.
+
 What it does not claim
 ----------------------
 Static analysis cannot see values. ``UnfedRule`` means *no feeder statement can feed this
@@ -34,8 +43,10 @@ area*, not that every cell is empty - a cell may still show because it is input 
 because of a feeder with a dynamic target cube (counted in the summary, and noted on every
 UnfedRule while any exist, since such a feeder could reach any cube). Ambiguous or
 unresolved elements are treated optimistically (as unrestricted), so the checker reports
-only clear gaps, never guesses. Rules on consolidations only (no ``N:``) and string rules
-are not expected to be fed.
+only clear gaps, never guesses.
+
+Control characters (tabs, line breaks) inside names are shown visibly in statements and
+details, e.g. ``Actual_S\\tAP``, so an invisible typo can be spotted.
 """
 
 from __future__ import annotations
@@ -78,6 +89,9 @@ SEVERITY_INFO = "Info"
 DYNAMIC_NOTE = " (feeders with a dynamic target cube were not checked)"
 
 _IF_PREFIX = re.compile(r"^IF\s*\(", re.IGNORECASE)
+_ZERO = re.compile(r"^[+-]?0*(?:\.0*)?$")
+_PASS_THROUGH = frozenset({"STET", "CONTINUE"})
+_CONTROL = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 
 
 class FindingType(str, Enum):
@@ -118,6 +132,13 @@ def _normalise(name: str) -> str:
 
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def visible(text: str) -> str:
+    """Show tabs and line breaks as ``\\t``, ``\\n`` and ``\\r`` so they can be seen."""
+    for char, shown in _CONTROL.items():
+        text = text.replace(char, shown)
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +205,38 @@ def _consolidated_only(area: ResolvedArea, hierarchy: Hierarchy) -> bool:
         elements and all(hierarchy.is_consolidated(dim, e) for e in elements)
         for dim, elements in area.restrictions.items()
     )
+
+
+def _strip_parens(text: str) -> str:
+    """Remove redundant outer brackets: ``((0))`` -> ``0``."""
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        inner, end = _extract_arg_string(text, 0)
+        if end != len(text) - 1:
+            break
+        text = inner.strip()
+    return text
+
+
+def only_zero_or_pass_through(expression: str) -> bool:
+    """Return True if every possible result is 0, STET or CONTINUE.
+
+    Follows ``IF(condition, a, b)`` into both branches, including nested IFs. Such a rule
+    never produces a value that needs to show, so it needs no feeder.
+    """
+    text = _strip_parens(expression.strip().rstrip(";"))
+    if text.upper() in _PASS_THROUGH or _ZERO.match(text):
+        return True
+    match = _IF_PREFIX.match(text)
+    if match is None:
+        return False
+    inner, end = _extract_arg_string(text, match.end() - 1)
+    if text[end + 1 :].strip():
+        return False  # something follows the IF(...), e.g. IF(...) * 2
+    args = _split_top_level_args(inner)
+    if len(args) != 3:
+        return False
+    return only_zero_or_pass_through(args[1]) and only_zero_or_pass_through(args[2])
 
 
 def candidate_cubes(expression: str) -> set[str] | None:
@@ -281,11 +334,12 @@ class _Collector:
                 finding_type=finding_type,
                 section=section,
                 line_no=line_no,
-                statement=_truncate(statement, _MAX_STATEMENT_LENGTH),
+                statement=_truncate(visible(statement), _MAX_STATEMENT_LENGTH),
                 related_cube=related_cube,
             )
             self._rows[key] = row
         row.count += 1
+        detail = visible(detail)
         if detail and detail not in row.details:
             row.details.append(detail)
         if related_cube and related_cube not in row.related_cube.split(", "):
@@ -311,7 +365,7 @@ class _Target:
 def _rule_needs_feeding(rule: ParsedRule) -> bool:
     if rule.qualifier in ("C", "S"):
         return False
-    return rule.expression.strip().rstrip(";").strip().upper() != "STET"
+    return not only_zero_or_pass_through(rule.expression)
 
 
 def _rule_can_be_fed(rule: ParsedRule, feedstrings: bool) -> bool:
@@ -342,13 +396,8 @@ def analyze_feeders(
         text = parsed.get(info.name)
         if text is None:
             continue
-        if text.feeders and not info.skipcheck:
-            collector.add(
-                info.name,
-                FindingType.FEEDERS_WITHOUT_SKIPCHECK,
-                section="Cube",
-                detail=f"{len(text.feeders)} feeder statement(s) have no effect",
-            )
+        own_key = _normalise(info.name)
+        before = len(incoming.get(own_key, []))
         for feeder in text.feeders:
             if not feeder.well_formed:
                 continue
@@ -367,6 +416,14 @@ def analyze_feeders(
                     collector,
                     analysis,
                 )
+        own_targets = len(incoming.get(own_key, [])) - before
+        if own_targets and not info.skipcheck:
+            collector.add(
+                info.name,
+                FindingType.FEEDERS_WITHOUT_SKIPCHECK,
+                section="Cube",
+                detail=f"{own_targets} feeder target(s) into this cube have no effect",
+            )
 
     # Pass 2: rules in SKIPCHECK cubes that nothing feeds.
     rule_areas: dict[str, list[dict[str, set[str]]]] = {}

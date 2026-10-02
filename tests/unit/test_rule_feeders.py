@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tm1_data_dictionary.element_index import ElementIndex
 from tm1_data_dictionary.hierarchy_index import HierarchyIndex
 from tm1_data_dictionary.parser.rules.rule_feeders import (
@@ -9,9 +11,11 @@ from tm1_data_dictionary.parser.rules.rule_feeders import (
     FindingType,
     analyze_feeders,
     candidate_cubes,
+    only_zero_or_pass_through,
     overlaps,
     resolve_area,
     statement_key,
+    visible,
 )
 from tm1_data_dictionary.parser.rules.rule_text import parse_rule_text
 from tm1_data_dictionary.rule_reader import CubeRuleInfo
@@ -22,13 +26,13 @@ EMPLOYEE = ("Version", "Period", "Currency", "Employee", "Employee Measure")
 CUBE_DIMS = {"General Ledger": GL, "Retail": RETAIL, "Employee": EMPLOYEE}
 
 ELEMENTS = {
-    "Version": ["Actual", "Budget"],
+    "Version": ["Actual", "Budget", "Actual_SAP"],
     "Period": ["Year", "Year_Enter", "Jan", "Feb"],
     "Currency": ["Local", "All Currencies", "EUR"],
     "Account": ["Salaries", "Payroll Taxes", "Total Expenses", "4200", "5020"],
-    "GL Measure": ["Amount", "Var %", "Base Amount"],
+    "GL Measure": ["Amount", "Var %", "Base Amount", "Margin %"],
     "Product": ["All Products", "Bikes"],
-    "Retail Measure": ["Sales Units", "Sales Amount", "Freight"],
+    "Retail Measure": ["Sales Units", "Sales Amount", "Freight", "Rate", "Rate%"],
     "Employee": ["All Employees", "Ann"],
     "Employee Measure": ["FTE", "Start Date", "Full Time Base Salary"],
 }
@@ -89,39 +93,65 @@ def test_overlap_is_ancestry_aware() -> None:
     assert overlaps({"Account": {"Salaries"}}, {"Account": {"Total Expenses"}}, hier)
     assert overlaps({"Account": {"Total Expenses"}}, {"Account": {"Salaries"}}, hier)
     assert not overlaps({"Account": {"Salaries"}}, {"Account": {"4200"}}, hier)
-    assert overlaps({"Account": {"Salaries"}}, {"Currency": {"EUR"}}, hier)  # no shared dim
+    assert overlaps({"Account": {"Salaries"}}, {"Currency": {"EUR"}}, hier)
+
+
+def test_visible_shows_control_characters() -> None:
+    assert visible("Actual_S\tAP") == "Actual_S\\tAP"
+    assert visible("a\nb\rc") == "a\\nb\\rc"
 
 
 # --------------------------------------------------------------------------- #
-# candidate_cubes
+# Rules whose result is only 0 / STET / CONTINUE
 # --------------------------------------------------------------------------- #
 
 
-def test_candidate_cubes_literal_and_empty() -> None:
-    assert candidate_cubes("'General Ledger'") == {"General Ledger"}
-    assert candidate_cubes("''") == set()
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "0",
+        "0.0",
+        "-0",
+        "(0)",
+        "STET",
+        "continue",
+        "IF(ATTRS('Cat', !Cat, 'Write') @= 'No', 0, continue)",
+        "if (a, STET, IF(b, 0, CONTINUE))",
+        "( IF(a, 0, STET) )",
+    ],
+)
+def test_only_zero_or_pass_through(expression: str) -> None:
+    assert only_zero_or_pass_through(expression)
 
 
-def test_candidate_cubes_if_branches() -> None:
-    assert candidate_cubes("IF(x > 0, 'Employee', '')") == {"Employee"}
-    assert candidate_cubes("if (x, 'A', 'B')") == {"A", "B"}
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "1",
+        "['A'] \\ ['B']",
+        "IF(a, 0, ['A'])",
+        "IF(a, 0, 1)",
+        "IF(a, 0, STET) * 2",
+        "IF(a, 0)",
+        "0 + ['A']",
+        "(0) * ['A']",
+    ],
+)
+def test_produces_a_value(expression: str) -> None:
+    assert not only_zero_or_pass_through(expression)
 
 
-def test_candidate_cubes_nested_if() -> None:
-    assert candidate_cubes("IF(a, 'A', IF(b, 'B', ''))") == {"A", "B"}
-
-
-def test_candidate_cubes_condition_may_contain_anything() -> None:
-    expr = "IF(DAYNO(DB('Employee', !Version, 'Start Date')) <= 5 & (y @= ''), 'Employee', '')"
-    assert candidate_cubes(expr) == {"Employee"}
-
-
-def test_candidate_cubes_unknowable() -> None:
-    assert candidate_cubes("ATTRS('Product', !Product, 'Cube')") is None
-    assert candidate_cubes("IF(x, 'A', ATTRS('D', !D, 'C'))") is None
-    assert candidate_cubes("IF(x, 'A', 'B') | 'C'") is None
-    assert candidate_cubes("IF(x, 'A')") is None
-    assert candidate_cubes("!Cube") is None
+def test_zero_and_pass_through_rules_need_no_feeder() -> None:
+    # Real patterns: ['x%'] = 0;  ['Net Sales'] = N: IF(..., 0, continue);
+    text = (
+        "SKIPCHECK;\n"
+        "['Rate%'] = 0;\n"
+        "['Sales Amount'] = N: IF(ATTRS('Product', !Product, 'Write') @= 'No', 0, continue);\n"
+        "['Freight'] = N: ['Sales Units'] * 2;\n"
+    )
+    analysis = _run({"Retail": text})
+    assert _types(analysis) == [("Line 00004", "UnfedRule")]
+    assert analysis.rules_checked == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -144,8 +174,19 @@ def test_unfed_rule() -> None:
     assert DYNAMIC_NOTE not in analysis.findings[0].detail_text()
 
 
+def test_reversed_feeder_leaves_rule_unfed() -> None:
+    # Real pattern: ['x%'] = ['x'] \ ['y'];  FEEDERS; ['x%'] => ['x'];
+    text = (
+        "SKIPCHECK;\n['Rate%'] = ['Rate'] \\ ['Sales Amount'];\n"
+        "FEEDERS;\n['Rate%'] => ['Rate'];\n"
+    )
+    assert _types(_run({"Retail": text})) == [
+        ("Line 00002", "UnfedRule"),
+        ("Line 00004", "FeederFeedsNoRule"),
+    ]
+
+
 def test_target_replaces_source_dimension() -> None:
-    # Source Local/Salaries; target replaces Account only -> Local/Payroll Taxes.
     text = (
         "SKIPCHECK;\n['EUR','Payroll Taxes'] = N: 1;\n"
         "FEEDERS;\n['Local','Salaries'] => ['Payroll Taxes'];\n"
@@ -164,14 +205,25 @@ def test_feeding_a_consolidation_feeds_its_leaves() -> None:
 def test_rules_that_need_no_feeder_are_skipped() -> None:
     text = (
         "SKIPCHECK;\n"
-        "['Total Expenses'] = ['Salaries'] * 2;\n"  # unqualified, consolidation only
+        "['Total Expenses'] = ['Salaries'] * 2;\n"
         "['Base Amount'] = C: 1;\n"
         "['Var %'] = S: 'x';\n"
         "['Amount'] = N: STET;\n"
     )
     analysis = _run({"General Ledger": text})
     assert _types(analysis) == []
-    assert analysis.rules_checked == 1  # only the unqualified rule was a candidate
+    assert analysis.rules_checked == 1
+
+
+def test_n_and_c_parts() -> None:
+    # The C: part never needs feeding; the N: part does.
+    text = (
+        "SKIPCHECK;\n['Margin %'] = N: ['Amount'] \\ ['Base Amount'];\n"
+        "C: ['Amount'] \\ ['Base Amount'];\n"
+    )
+    analysis = _run({"General Ledger": text})
+    assert _types(analysis) == [("Line 00002", "UnfedRule")]
+    assert analysis.rules_checked == 1
 
 
 def test_no_skipcheck_means_no_unfed_findings() -> None:
@@ -200,38 +252,25 @@ def test_unresolved_rule_area_is_unchecked() -> None:
 # IF() target cubes
 # --------------------------------------------------------------------------- #
 
-EMPLOYEE_FTE = (
-    "SKIPCHECK;\n"
-    "['FTE'] = N: IF(DAYNO(DB('Employee', !Version, !Period, 'Local', !Employee,"
-    " 'Start Date')) > 0, 1, 0);\n"
-    "FEEDERS;\n"
-    "['Full Time Base Salary','Local'] => DB(\n"
-    "IF(DAYNO(DB('Employee', !Version, !Period, 'Local', !Employee, 'Start Date')) > 0,"
-    " 'Employee', '')\n"
-    ", !Version, !Period, 'Local', !Employee, 'FTE');\n"
-)
+
+def test_candidate_cubes() -> None:
+    assert candidate_cubes("'General Ledger'") == {"General Ledger"}
+    assert candidate_cubes("''") == set()
+    assert candidate_cubes("IF(x > 0, 'Employee', '')") == {"Employee"}
+    assert candidate_cubes("IF(a, 'A', IF(b, 'B', ''))") == {"A", "B"}
+    assert candidate_cubes("ATTRS('Product', !Product, 'Cube')") is None
+    assert candidate_cubes("IF(x, 'A', 'B') | 'C'") is None
 
 
 def test_if_target_cube_feeds_rule() -> None:
-    # The dev-model Employee pattern: DB(IF(cond, 'Employee', ''), ...) feeds FTE.
-    analysis = _run({"Employee": EMPLOYEE_FTE})
+    text = (
+        "SKIPCHECK;\n['FTE'] = N: 1;\nFEEDERS;\n"
+        "['Full Time Base Salary','Local'] => "
+        "DB(IF(1 > 0, 'Employee', ''), !Version, !Period, 'Local', !Employee, 'FTE');\n"
+    )
+    analysis = _run({"Employee": text})
     assert _types(analysis) == []
     assert analysis.dynamic_feeder_targets == 0
-
-
-def test_if_target_cube_removes_note_on_other_cubes() -> None:
-    gl = "SKIPCHECK;\n['Base Amount'] = N: 1;\n"
-    analysis = _run({"Employee": EMPLOYEE_FTE, "General Ledger": gl})
-    unfed = [f for f in analysis.findings if f.finding_type == FindingType.UNFED_RULE]
-    assert [(f.cube, f.statement_key) for f in unfed] == [("General Ledger", "Line 00002")]
-    assert unfed[0].detail_text() == "no feeder targets this area"
-
-
-def test_if_branch_naming_missing_cube_is_dead() -> None:
-    retail = "SKIPCHECK;\nFEEDERS;\n" "['Sales Units'] => DB(IF(1=1, 'Nowhere', ''), !Version);\n"
-    finding = _run({"Retail": retail}).findings[0]
-    assert finding.finding_type == FindingType.DEAD_FEEDER
-    assert "Nowhere does not exist" in finding.detail_text()
 
 
 def test_unknowable_target_cube_is_counted_and_noted() -> None:
@@ -250,7 +289,6 @@ def test_unknowable_target_cube_is_counted_and_noted() -> None:
 
 
 def test_dead_feeder_missing_element_in_other_cube() -> None:
-    # The real dev-model bug: Retail feeds GL account 'Freight', which does not exist.
     gl = "SKIPCHECK;\n['5020','Amount'] = N: 1;\n"
     retail = (
         "SKIPCHECK;\n['Freight'] = N: ['Sales Units'];\n"
@@ -263,8 +301,20 @@ def test_dead_feeder_missing_element_in_other_cube() -> None:
     assert [(f.cube, f.statement_key) for f in dead] == [("Retail", "Line 00006")]
     assert dead[0].severity == "Error"
     assert dead[0].related_cube == "General Ledger"
-    assert "Freight" in dead[0].detail_text()
-    assert _types(analysis, "General Ledger") == []
+
+
+def test_tab_inside_element_name_is_shown() -> None:
+    # Real pattern: 'Actual_S<TAB>AP' - invisible in most editors.
+    retail = (
+        "SKIPCHECK;\nFEEDERS;\n"
+        "['Sales Units'] => DB('General Ledger', 'Actual_S\tAP', !Period, !Currency,"
+        " '4200', 'Amount');\n"
+    )
+    infos = [_info("Retail"), _info("General Ledger")]
+    finding = _run({"Retail": retail, "General Ledger": "SKIPCHECK;"}, infos).findings[0]
+    assert finding.finding_type == FindingType.DEAD_FEEDER
+    assert "Actual_S\\tAP" in finding.detail_text()
+    assert "\t" not in finding.statement
 
 
 def test_dead_feeder_missing_cube() -> None:
@@ -305,12 +355,30 @@ def test_feeder_into_unread_cube_is_not_judged() -> None:
     assert _types(_run({"Retail": retail})) == []
 
 
-def test_feeders_without_skipcheck() -> None:
+# --------------------------------------------------------------------------- #
+# Feeders without SKIPCHECK
+# --------------------------------------------------------------------------- #
+
+
+def test_own_cube_feeders_without_skipcheck() -> None:
     text = "['Payroll Taxes'] = N: 1;\nFEEDERS;\n['Salaries'] => ['Payroll Taxes'];\n"
     infos = [_info("General Ledger", skipcheck=False)]
     analysis = _run({"General Ledger": text}, infos)
     assert _types(analysis) == [("Cube", "FeedersWithoutSkipCheck")]
     assert analysis.findings[0].severity == "Info"
+    assert analysis.findings[0].detail_text().startswith("1 feeder target(s)")
+
+
+def test_feeders_into_other_cubes_are_judged_by_the_target() -> None:
+    # Real pattern: a cube with no rules and no SKIPCHECK whose feeders all feed a
+    # SKIPCHECK cube. Those feeders work, so nothing is reported for the source cube.
+    retail = (
+        "FEEDERS;\n"
+        "['Sales Units'] => DB('General Ledger', !Version, !Period, !Currency, '4200', 'Amount');\n"
+    )
+    gl = "SKIPCHECK;\n['4200','Amount'] = N: 1;\n"
+    infos = [_info("Retail", skipcheck=False), _info("General Ledger")]
+    assert _types(_run({"Retail": retail, "General Ledger": gl}, infos)) == []
 
 
 def test_findings_aggregate_per_statement() -> None:

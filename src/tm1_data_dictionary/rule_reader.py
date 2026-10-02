@@ -1,25 +1,24 @@
 """Read cube rule facts from a TM1 instance.
 
 This is the rules equivalent of ti_reader.py: an anti-corruption layer over
-TM1py's Cube/Rules objects, so the rest of the codebase depends on a small,
-stable dataclass rather than reaching into TM1py's object model directly.
+TM1py's Cube object, so the rest of the codebase depends on a small, stable
+dataclass rather than reaching into TM1py's object model directly.
 
-Uses TM1py's own rule parsing (Cube.has_rules, Rules.skipcheck/feedstrings/
-undefvals/has_feeders/rule_statements/feeder_statements) rather than
-re-deriving pragma detection ourselves. This is deliberately the *cube-level*
-reader only - it answers "does this cube have rules, and what shape are
-they?" It does not parse individual statements for cross-cube references,
-element literals, or feeder coverage; that is a separate, more careful,
-case-preserving parser for later phases (2b onward), because TM1py's own
-comment-stripping only recognises a whole line starting with "#" and
-uppercases every statement - adequate for counts, not for extracting exact
-element names or line-accurate detail.
+TM1py supplies the cube's dimensions, whether it has rules, and the raw rule
+text. Everything derived from the text - pragmas, whether there are feeders,
+and the statement counts - comes from tm1dd's own parser
+(:mod:`~tm1_data_dictionary.parser.rules.rule_text`), the same one every later
+phase uses. On real models TM1py's statement split disagreed with it: it
+reported no feeders for cubes whose feeders tm1dd found and checked, and it
+counts the ``C:`` part of an ``N:``/``C:`` rule as a separate statement. Using one
+parser keeps }Meta_Rule_Cube consistent with the feeder findings.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tm1_data_dictionary.parser.rules.rule_text import parse_rule_text
 from tm1_data_dictionary.tm1_client import TM1Client
 
 
@@ -77,7 +76,8 @@ class RuleReader:
         }Meta_Rule_Cube).
         """
         cube = self._client.service.cubes.get(name)
-        if not cube.has_rules:
+        text = (cube.rules.text or "") if cube.has_rules else ""
+        if not text.strip():
             return CubeRuleInfo(
                 name=cube.name,
                 dimension_names=tuple(cube.dimensions),
@@ -90,16 +90,16 @@ class RuleReader:
                 feeder_statement_count=0,
                 raw_rule_text="",
             )
-        rules = cube.rules
+        parsed = parse_rule_text(text)
         return CubeRuleInfo(
             name=cube.name,
             dimension_names=tuple(cube.dimensions),
             has_rules=True,
-            has_feeders=bool(rules.has_feeders),
-            skipcheck=bool(rules.skipcheck),
-            feedstrings=bool(rules.feedstrings),
-            undefvals=bool(rules.undefvals),
-            rule_statement_count=len(rules.rule_statements),
-            feeder_statement_count=len(rules.feeder_statements),
-            raw_rule_text=rules.text,
+            has_feeders=parsed.feeder_count > 0,
+            skipcheck=parsed.has_pragma("SKIPCHECK"),
+            feedstrings=parsed.has_pragma("FEEDSTRINGS"),
+            undefvals=parsed.has_pragma("UNDEFVALS"),
+            rule_statement_count=parsed.rule_count,
+            feeder_statement_count=parsed.feeder_count,
+            raw_rule_text=text,
         )
