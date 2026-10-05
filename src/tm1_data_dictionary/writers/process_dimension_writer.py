@@ -22,14 +22,25 @@ from __future__ import annotations
 from typing import Any
 
 from tm1_data_dictionary.parser.dim_rollup import DimLineageRow
+from tm1_data_dictionary.schema import (
+    CUBE_PROCESS_DIMENSION,
+    DIM_DIM_ROLE,
+    DIM_DIMENSION,
+    DIM_PROCESS,
+    STRING,
+)
 from tm1_data_dictionary.tm1_client import TM1Client
 
-DIM_PROCESS = "}Meta_Process"
-DIM_DIMENSION = "}Meta_Dimension"
-DIM_DIM_ROLE = "}Meta_DimRole"
-CUBE_PROCESS_DIMENSION = "}Meta_Process_Dimension"
-
-STRING = "String"
+# Names come from schema.py (single source of truth); re-exported for callers and tests.
+__all__ = [
+    "CUBE_PROCESS_DIMENSION",
+    "DIM_DIM_ROLE",
+    "DIM_DIMENSION",
+    "DIM_PROCESS",
+    "STRING",
+    "clear_process_dimension",
+    "write_dimension_lineage",
+]
 
 
 def _load_element_class() -> Any:

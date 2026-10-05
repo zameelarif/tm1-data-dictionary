@@ -26,13 +26,23 @@ creation is idempotent. Mirrors ``process_cube_writer.py``.
 from __future__ import annotations
 
 from tm1_data_dictionary.parser.chain_rollup import ChainRow
+from tm1_data_dictionary.schema import (
+    CUBE_PROCESS_CHAIN,
+    DIM_PROCESS,
+    DIM_PROCESS_CALLEE,
+    STRING,
+)
 from tm1_data_dictionary.tm1_client import TM1Client
 
-DIM_PROCESS = "}Meta_Process"
-DIM_PROCESS_CALLEE = "}Meta_Process_Callee"
-CUBE_PROCESS_CHAIN = "}Meta_Process_Chain"
-
-STRING = "String"
+# Names come from schema.py (single source of truth); re-exported for callers and tests.
+__all__ = [
+    "CUBE_PROCESS_CHAIN",
+    "DIM_PROCESS",
+    "DIM_PROCESS_CALLEE",
+    "STRING",
+    "clear_process_chain",
+    "write_chain_lineage",
+]
 
 
 def _load_element_class():  # noqa: ANN202

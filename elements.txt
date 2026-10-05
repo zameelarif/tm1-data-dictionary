@@ -1,0 +1,20 @@
+# tm1dd - element watch list (used by: tm1dd extract-elements)
+#
+# List a dimension in square brackets, then the elements to trace in it, one per line.
+# Blank lines and #-comments are ignored. Matching is case- and space-insensitive, and
+# an element also matches its aliases.
+#
+# For every listed element, tm1dd searches all TI code (comments ignored) and records each
+# place it appears that the static element pass did not already explain:
+#   Compare     - compared with @= / @<> (filters, ItemSkip)
+#   Reference   - an argument of a function tm1dd does not catalogue (DIMIX ...)
+#   Unexplained - anything else, e.g. inside a longer string
+# Listed elements with no TI reference at all are printed in the run summary.
+#
+# Edit freely - no rebuild or reinstall is needed. Example:
+#
+# [Version]
+# Budget
+#
+# [Account]
+# 4000

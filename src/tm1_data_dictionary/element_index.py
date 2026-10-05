@@ -274,6 +274,11 @@ class ElementIndex:
                 elements.setdefault(key[1], principal)
         return principal
 
+    def names_and_aliases(self, dimension: str) -> dict[str, str] | None:
+        """Return ``{normalised name or alias: principal name}``, or None if unreadable."""
+        elements = self._elements(dimension)
+        return None if elements is None else dict(elements)
+
     def available(self, dimension: str) -> bool:
         """Return whether the dimension's elements could be read."""
         return self._elements(dimension) is not None

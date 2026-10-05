@@ -1,0 +1,13 @@
+# tm1dd - extra TI function signatures (optional; used by: tm1dd extract-elements)
+#
+# tm1dd already knows CellPutN/S, CellIncrementN, CellGetN/S, AttrPutS/N, AttrS/N,
+# ElementAttr*, DimensionElement*, HierarchyElement* and SubsetElementInsert. Add a line
+# here only for functions it does not know (or to change one). Positions are 1-based.
+#
+#   Name = Role, cube=N, elements=N+            cell functions ("N+" = from N onwards)
+#   Name = Role, dim=N, element=N[, element=N]  dimension and attribute functions
+#
+# Roles: Write | Read | AttrWrite | AttrRead | DimMaintain | Subset
+#
+# Example:
+# CellPutProportionalSpread = Write, cube=2, elements=3+

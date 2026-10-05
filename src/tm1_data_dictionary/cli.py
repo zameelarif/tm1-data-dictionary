@@ -27,9 +27,16 @@ from tm1_data_dictionary.credentials import (
     get_keyring_secret,
     set_keyring_secret,
 )
+from tm1_data_dictionary.element_index import (
+    ElementIndex,
+    tm1_element_loader,
+    tm1_element_resolver,
+)
+from tm1_data_dictionary.element_where import find, resolve_element, write_csv
 from tm1_data_dictionary.env_check import run_checks
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
+from tm1_data_dictionary.extract_elements import extract_all_elements
 from tm1_data_dictionary.extract_rules import extract_all_rules
 from tm1_data_dictionary.graph import build_graph, render_html
 from tm1_data_dictionary.parser.assignments import summarize_variables
@@ -38,9 +45,14 @@ from tm1_data_dictionary.parser.chain_rollup import rollup_chain_lineage
 from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.datasource_rollup import datasource_row
 from tm1_data_dictionary.parser.diagnostics import collect_unresolved, diagnose
+from tm1_data_dictionary.parser.element_watchlist import (
+    DEFAULT_ELEMENT_WATCHLIST_FILENAME,
+    WatchlistError,
+)
 from tm1_data_dictionary.parser.references import extract_references
 from tm1_data_dictionary.parser.rollup import rollup_cube_lineage
 from tm1_data_dictionary.parser.ti_reader import TIReader
+from tm1_data_dictionary.parser.ti_signatures import DEFAULT_SIGNATURE_FILENAME, SignatureError
 from tm1_data_dictionary.schema import LEGACY_CUBES
 from tm1_data_dictionary.tm1_client import TM1Client, TM1ClientError
 from tm1_data_dictionary.views import DEFAULT_PREFIX, create_views
@@ -48,7 +60,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.7"
+SCHEMA_VERSION = "1.8"
 
 
 # --------------------------------------------------------------------------- #
@@ -865,6 +877,157 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
         click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
     elif not summary.dry_run:
         click.echo("  Extraction succeeded, but the audit record was not written.")
+
+
+@main.command(name="extract-elements")
+@_config_option
+@_env_option
+@click.option(
+    "--elements",
+    "elements_file",
+    default=None,
+    help=f"Element watch list (default: {DEFAULT_ELEMENT_WATCHLIST_FILENAME} beside config.yaml).",
+)
+@click.option(
+    "--signatures",
+    "signatures_file",
+    default=None,
+    help=f"Extra TI function signatures (default: {DEFAULT_SIGNATURE_FILENAME} beside "
+    "config.yaml, if present).",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-process progress lines (show only the summary).",
+)
+def extract_elements_cmd(
+    config_path: str,
+    environment: str | None,
+    elements_file: str | None,
+    signatures_file: str | None,
+    quiet: bool,
+) -> None:
+    """Extract element-level lineage for EVERY process into }Meta_Process_Element.
+
+    Records which elements each process writes, clears (ViewZeroOut), reads, filters its
+    source view on, and maintains - following literals, variables (line by line) and the
+    views and subsets the process builds. Elements only known at run time are kept as
+    (Runtime). Elements listed in the watch list are also searched for everywhere, and any
+    hit tm1dd cannot explain is recorded as Unexplained.
+
+    Deliberately separate from 'extract'. Records the run into }Meta_Extraction_Audit.
+    Honours dry-run mode.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+
+    def _progress(i: int, total: int, name: str, status: str) -> None:
+        if not quiet:
+            click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
+
+    start = datetime.now(UTC)
+    run_by = f"{getpass.getuser()} via {cfg.connection.user}"
+    audit_recorded = False
+    base = Path(config_path).parent
+    watchlist = elements_file or (base / DEFAULT_ELEMENT_WATCHLIST_FILENAME)
+    signatures = signatures_file or (base / DEFAULT_SIGNATURE_FILENAME)
+    try:
+        with TM1Client(cfg) as client:
+            if client.dry_run:
+                click.echo("Dry-run: parsing all processes, nothing will be written.")
+            click.echo("Extracting element lineage for all processes...")
+            summary = extract_all_elements(
+                client,
+                progress=_progress,
+                watchlist_file=watchlist,
+                signatures_file=signatures,
+            )
+            if not client.dry_run:
+                status = "Success" if summary.failed == 0 else "CompletedWithFailures"
+                warnings = f"{summary.failed} process(es) failed" if summary.failed else ""
+                try:
+                    AuditWriter(client).record_run(
+                        extractor_version=__version__,
+                        schema_version=SCHEMA_VERSION,
+                        start_time=start,
+                        exit_status=status,
+                        run_by=run_by,
+                        warnings=warnings,
+                        metrics={
+                            "element_processes_included": summary.included,
+                            "element_processes_failed": summary.failed,
+                            "element_rows": summary.rows_written,
+                            "element_references": summary.element_references,
+                            "element_literal": summary.literal,
+                            "element_resolved": summary.resolved,
+                            "element_runtime": summary.runtime,
+                            "element_missing": summary.missing_elements,
+                            "watched_elements": summary.watched_elements,
+                            "watch_rows": summary.watch_hits,
+                            "watch_unexplained": summary.watch_unexplained,
+                        },
+                    )
+                    audit_recorded = True
+                except Exception as exc:  # noqa: BLE001
+                    click.echo(f"  Audit record not written: {exc}")
+    except (WatchlistError, SignatureError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("")
+    click.echo("Element extraction complete.")
+    for line in summary.as_lines():
+        click.echo(f"  {line}")
+    if audit_recorded:
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
+    elif not summary.dry_run:
+        click.echo("  Extraction succeeded, but the audit record was not written.")
+
+
+@main.command(name="where")
+@_config_option
+@_env_option
+@click.option("--dim", "dimension", required=True, help="Dimension the element belongs to.")
+@click.option("--element", required=True, help="Element name or alias.")
+@click.option("--csv", "csv_path", default=None, help="Also write the rows to this CSV file.")
+def where_cmd(
+    config_path: str,
+    environment: str | None,
+    dimension: str,
+    element: str,
+    csv_path: str | None,
+) -> None:
+    """Show every TI process and rule that uses an element (read-only).
+
+    Reads }Meta_Process_Element and }Meta_Rule_Element_Reference, so it reflects the last
+    'extract-elements' and 'extract-rules' runs. Aliases are resolved to the element.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+    try:
+        with TM1Client(cfg) as client:
+            index = ElementIndex(tm1_element_loader(client), tm1_element_resolver(client))
+            names = resolve_element(index, dimension, element)
+            rows = find(client.service, dimension, names)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    shown = " / ".join(names)
+    if not rows:
+        click.echo(f"No TI or rule reference found for {dimension}: {shown}")
+        click.echo("(Run 'tm1dd extract-elements' and 'tm1dd extract-rules' first.)")
+        return
+    click.echo(f"{dimension}: {shown} - {len(rows)} reference(s)")
+    click.echo(f"  {'SOURCE':<5} {'PROCESS / RULE CUBE':<45} {'ROLE':<13} {'LINE':>5}  FUNCTION")
+    click.echo(f"  {'-' * 5} {'-' * 45} {'-' * 13} {'-' * 5}  {'-' * 20}")
+    for r in rows:
+        line = f"{r.block}:{r.line}" if r.source == "TI" else str(r.line)
+        click.echo(f"  {r.source:<5} {r.name:<45} {r.role:<13} {line:>5}  {r.function}")
+    if csv_path:
+        write_csv(csv_path, rows)
+        click.echo(f"Wrote {len(rows)} row(s) to {csv_path}")
 
 
 @main.command(name="diagnose-unresolved")

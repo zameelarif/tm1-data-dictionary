@@ -54,6 +54,7 @@ _SCHEMAS = (
     s.rule_element_reference_schema,
     s.rule_function_schema,
     s.rule_feeder_finding_schema,
+    s.process_element_schema,
 )
 CUBE_DIMENSIONS: dict[str, tuple[str, ...]] = {
     cube.name: cube.dimensions for build in _SCHEMAS for cube in build().cubes
@@ -72,6 +73,7 @@ ANCHOR_MEASURE: dict[str, str] = {
     s.CUBE_RULE_ELEMENT_REFERENCE: "Count",
     s.CUBE_RULE_FUNCTION: "Count",
     s.CUBE_RULE_FEEDER_FINDING: "Count",
+    s.CUBE_PROCESS_ELEMENT: "Count",
 }
 
 ALL = "All"
@@ -96,6 +98,7 @@ VIEWS: tuple[ViewDef, ...] = (
     _default(s.CUBE_RULE_ELEMENT_REFERENCE, "element references in rules"),
     _default(s.CUBE_RULE_FUNCTION, "rule function usage"),
     _default(s.CUBE_RULE_FEEDER_FINDING, "feeder findings"),
+    _default(s.CUBE_PROCESS_ELEMENT, "element-level TI lineage"),
     # ---- TI case views ---------------------------------------------------------------
     ViewDef(
         s.CUBE_PROCESS_CUBE,
@@ -126,6 +129,37 @@ VIEWS: tuple[ViewDef, ...] = (
         "Dimension Builders",
         "Processes that insert elements into dimensions",
         pin=((s.DIM_DIM_ROLE, "DimUpdate"),),
+    ),
+    # ---- Element lineage case views -------------------------------------------------
+    ViewDef(
+        s.CUBE_PROCESS_ELEMENT,
+        "Element Writes",
+        "Which process writes to which element",
+        pin=((s.DIM_PROCESS_ELEMENT_ROLE, "Write"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_ELEMENT,
+        "Element Clears",
+        "Which elements each zero-out clears",
+        pin=((s.DIM_PROCESS_ELEMENT_ROLE, "Clear"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_ELEMENT,
+        "Runtime Elements",
+        "Element positions only known when the process runs",
+        pin=((s.DIM_ELEMENT, "(Runtime)"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_ELEMENT,
+        "Missing TI Elements",
+        "Processes naming an element that does not exist",
+        where=("ElementExists", "No"),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_ELEMENT,
+        "Watch-list Unexplained",
+        "Watched elements found where tm1dd could not say how they are used",
+        pin=((s.DIM_PROCESS_ELEMENT_ROLE, "Unexplained"),),
     ),
     # ---- Rules case views ------------------------------------------------------------
     ViewDef(

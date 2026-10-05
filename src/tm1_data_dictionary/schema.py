@@ -131,6 +131,11 @@ DIM_RULE_FEEDER_FINDING_TYPE = "}Meta_RuleFeederFindingType"
 DIM_RULE_FEEDER_FINDING_MEASURE = "}Meta_RuleFeederFindingMeasure"
 CUBE_RULE_FEEDER_FINDING = "}Meta_Rule_Feeder_Finding"
 
+# --- }Meta_Process_Element (Phase 3a - element lineage) ---
+DIM_PROCESS_ELEMENT_ROLE = "}Meta_ProcessElementRole"
+DIM_PROCESS_ELEMENT_MEASURE = "}Meta_ProcessElementMeasure"
+CUBE_PROCESS_ELEMENT = "}Meta_Process_Element"
+
 # --- }Meta_Rule_Function (Phase 2d - rules) ---
 DIM_RULE_FUNCTION_MEASURE = "}Meta_RuleFunctionMeasure"
 CUBE_RULE_FUNCTION = "}Meta_Rule_Function"
@@ -300,6 +305,34 @@ RULE_FEEDER_FINDING_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Statement", STRING),  # the statement (truncated)
     ElementDef("Detail", STRING),  # what was found
     ElementDef("RelatedCube", STRING),  # target cube(s) for feeder findings
+)
+
+# What a TI statement does with an element, in }Meta_Process_Element.
+PROCESS_ELEMENT_ROLE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("Write", STRING),  # CellPutN / CellPutS / CellIncrementN target
+    ElementDef("Clear", STRING),  # in the view a ViewZeroOut clears
+    ElementDef("Read", STRING),  # CellGetN / CellGetS
+    ElementDef("SourceFilter", STRING),  # in the view the process reads as its data source
+    ElementDef("Subset", STRING),  # inserted into a subset not used by a tracked view
+    ElementDef("AttrWrite", STRING),  # AttrPutS / ElementAttrPutS ...
+    ElementDef("AttrRead", STRING),  # AttrS / ElementAttrS ...
+    ElementDef("DimMaintain", STRING),  # DimensionElementInsert / ComponentAdd / Delete ...
+    ElementDef("Compare", STRING),  # watch list: compared with @= / @<>
+    ElementDef("Reference", STRING),  # watch list: argument of an uncatalogued function
+    ElementDef("Unexplained", STRING),  # watch list: found, but tm1dd could not say how
+)
+
+# Measures for }Meta_Process_Element (one row per process/cube/dimension/element/role).
+PROCESS_ELEMENT_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # statements rolled into the row
+    ElementDef("FirstBlock", STRING),  # Prolog | Metadata | Data | Epilog
+    ElementDef("FirstLine", NUMERIC),  # line of the first statement
+    ElementDef("Function", STRING),  # TI function, e.g. CellPutN, ViewZeroOut
+    ElementDef("Kind", STRING),  # Literal | Variable | SourceVariable | Parameter | MDX | ...
+    ElementDef("Confidence", STRING),  # Literal | Resolved | Runtime
+    ElementDef("Expression", STRING),  # the argument as written
+    ElementDef("ElementExists", STRING),  # Yes | No | Unknown
+    ElementDef("Statement", STRING),  # the statement (truncated)
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -617,6 +650,42 @@ def rule_feeder_finding_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(cube_dim, statement_dim, type_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_element_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Element and its dimensions (Phase 3a).
+
+    Dimensioned }Meta_Process x }Meta_Cube x }Meta_Dimension x }Meta_Element x
+    }Meta_ProcessElementRole x }Meta_ProcessElementMeasure.
+
+    Records, per process, every element it writes, clears, reads, filters its source view
+    on, or maintains - resolved through literals, variables and the views and subsets the
+    process builds. }Meta_Dimension and }Meta_Element are shared with
+    }Meta_Rule_Element_Reference, so TI and rule references line up on the same axes.
+    Elements that can only be known at run time are kept as (Runtime), MDX subsets as
+    (MDX) and whole dimensions as (All).
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    cube_dim = DimensionDef(DIM_CUBE, (SEED_ELEMENT,))
+    dimension_dim = DimensionDef(DIM_DIMENSION, (SEED_ELEMENT,))
+    element_dim = DimensionDef(DIM_ELEMENT, (SEED_ELEMENT,))
+    role_dim = DimensionDef(DIM_PROCESS_ELEMENT_ROLE, PROCESS_ELEMENT_ROLE_ELEMENTS)
+    measure_dim = DimensionDef(DIM_PROCESS_ELEMENT_MEASURE, PROCESS_ELEMENT_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_ELEMENT,
+        (
+            DIM_PROCESS,
+            DIM_CUBE,
+            DIM_DIMENSION,
+            DIM_ELEMENT,
+            DIM_PROCESS_ELEMENT_ROLE,
+            DIM_PROCESS_ELEMENT_MEASURE,
+        ),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, cube_dim, dimension_dim, element_dim, role_dim, measure_dim),
         cubes=(cube,),
     )
 

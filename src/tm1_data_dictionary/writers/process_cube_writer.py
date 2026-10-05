@@ -23,14 +23,25 @@ writer only adds elements and writes cells, matching the audit-writer pattern.
 from __future__ import annotations
 
 from tm1_data_dictionary.parser.rollup import CubeLineageRow
+from tm1_data_dictionary.schema import (
+    CUBE_PROCESS_CUBE,
+    DIM_CUBE,
+    DIM_PROCESS,
+    DIM_ROLE,
+    STRING,
+)
 from tm1_data_dictionary.tm1_client import TM1Client
 
-DIM_PROCESS = "}Meta_Process"
-DIM_CUBE = "}Meta_Cube"
-DIM_ROLE = "}Meta_Role"
-CUBE_PROCESS_CUBE = "}Meta_Process_Cube"
-
-STRING = "String"
+# Names come from schema.py (single source of truth); re-exported for callers and tests.
+__all__ = [
+    "CUBE_PROCESS_CUBE",
+    "DIM_CUBE",
+    "DIM_PROCESS",
+    "DIM_ROLE",
+    "STRING",
+    "clear_process_cube",
+    "write_cube_lineage",
+]
 
 
 def _load_element_class():  # noqa: ANN202
