@@ -166,3 +166,31 @@ def test_already_exists_from_tm1_is_tolerated(fake_tm1py_element: None) -> None:
     service.elements.exists = lambda d, h, n: False  # type: ignore[method-assign,assignment]
     service.elements.existing["}Meta_Element"] = ["actual"]
     assert write_element_lineage(_client(service), [_row()]) == 1
+
+
+def test_tab_in_ti_literal_is_written_visibly(fake_tm1py_element: None) -> None:
+    service = _FakeService()
+    row = ElementRow(**{**_row().__dict__, "element": "Act\tual", "expression": "'Act\tual'"})
+    assert write_element_lineage(_client(service), [row]) == 1
+    assert ("}Meta_Element", "Act<TAB>ual", "Numeric") in service.elements.created
+    _, cells = service.cells.writes[0]
+    key = ("P", "Sales", "Version", "Act<TAB>ual", "Write")
+    assert cells[key + ("Expression",)] == "'Act<TAB>ual'"
+
+
+def test_refused_row_is_skipped_and_reported(fake_tm1py_element: None) -> None:
+    from tm1_data_dictionary.writers.safe_write import WriteReport
+
+    service = _FakeService()
+    original = service.cells.write
+
+    def picky(cube_name: str, cellset_as_dict: dict) -> None:
+        if any(k[3] == "Bad" for k in cellset_as_dict):
+            raise RuntimeError("member not found")
+        original(cube_name, cellset_as_dict)
+
+    service.cells.write = picky  # type: ignore[method-assign]
+    report = WriteReport()
+    written = write_element_lineage(_client(service), [_row(), _row("Bad")], report)
+    assert written == 1
+    assert report.rows_not_written == 1

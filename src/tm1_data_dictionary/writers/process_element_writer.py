@@ -14,6 +14,11 @@ Cube shape:
 ``}Meta_Rule_Element_Reference``, so one element can be followed through TI and rules on
 the same axes.
 
+Element names come from TI code, so they can hold hidden characters (a tab or line break
+inside a quoted literal). Every key name is passed through
+:func:`~tm1_data_dictionary.writers.safe_write.safe_name` before writing, and cells are
+written in batches; a row TM1 still refuses is skipped and reported, never the whole cube.
+
 Elements are created in bulk: each key dimension's names are read once and only missing
 ones are added, so a large model does not cost one REST call per element. Guarded by
 ``ensure_writable`` (dry-run safe); TM1py is imported lazily.
@@ -35,6 +40,12 @@ from tm1_data_dictionary.schema import (
     STRING,
 )
 from tm1_data_dictionary.tm1_client import TM1Client
+from tm1_data_dictionary.writers.safe_write import (
+    WriteReport,
+    ensure_elements,
+    safe_name,
+    write_rows,
+)
 
 
 def _load_element_class() -> Any:
@@ -78,7 +89,7 @@ def aggregate(rows: list[ElementRow]) -> list[tuple[ElementRow, int]]:
     """Group rows by key (case-insensitive), keeping the earliest occurrence and a count."""
     grouped: dict[tuple[str, ...], _Aggregate] = {}
     for row in rows:
-        norm = tuple(part.replace(" ", "").lower() for part in row.key)
+        norm = tuple(safe_name(part).replace(" ", "").lower() for part in row.key)
         agg = grouped.get(norm)
         if agg is None:
             grouped[norm] = _Aggregate(first=row, count=1)
@@ -93,53 +104,39 @@ def clear_process_element(client: TM1Client) -> None:
     client.service.cells.clear(cube=CUBE_PROCESS_ELEMENT)
 
 
-def _norm(name: str) -> str:
-    """TM1 element names are case- and space-insensitive."""
-    return name.replace(" ", "").lower()
+def build_rows(
+    grouped: list[tuple[ElementRow, int]],
+) -> list[tuple[tuple[str, ...], dict[str, object]]]:
+    """Turn aggregated rows into safe ``(key, measures)`` rows for writing."""
+    out: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    for row, count in grouped:
+        key = tuple(safe_name(part) for part in row.key)
+        out.append(
+            (
+                key,
+                {
+                    "Count": count,
+                    "FirstBlock": row.block,
+                    "FirstLine": row.line_no,
+                    "Function": row.function,
+                    "Kind": row.kind,
+                    "Confidence": row.confidence,
+                    "Expression": safe_name(row.expression),
+                    "ElementExists": row.element_exists,
+                    "Statement": safe_name(row.statement),
+                },
+            )
+        )
+    return out
 
 
-def _ensure_elements(
-    service: Any, dimension: str, names: set[str], element_type: str = NUMERIC
-) -> None:
-    """Create the names missing from ``dimension``, once per TM1-distinct name.
-
-    TM1 treats ``Sales_Weeks`` and ``Sales_weeks`` as the same element, but TI code often
-    spells one name several ways. Names are therefore de-duplicated case- and
-    space-insensitively (the first spelling wins), and every name created is remembered so
-    a later spelling of it is not created again. A create that fails only because the
-    element already exists is ignored.
-    """
-    existing: set[str] | None
-    try:
-        names_now = service.elements.get_element_names(dimension, dimension)
-        existing = {_norm(n) for n in names_now}
-    except Exception:  # noqa: BLE001 - fall back to per-element checks
-        existing = None
-    element_cls = _load_element_class()
-    done: set[str] = set()
-    for name in sorted(names):
-        key = _norm(name)
-        if key in done:
-            continue
-        done.add(key)
-        if existing is not None:
-            if key in existing:
-                continue
-        elif service.elements.exists(dimension, dimension, name):
-            continue
-        try:
-            service.elements.create(dimension, dimension, element_cls(name, element_type))
-        except Exception as exc:  # noqa: BLE001 - tolerate "already exists" only
-            if "already exists" not in str(exc).lower():
-                raise
-        if existing is not None:
-            existing.add(key)
-
-
-def write_element_lineage(client: TM1Client, rows: list[ElementRow]) -> int:
+def write_element_lineage(
+    client: TM1Client, rows: list[ElementRow], report: WriteReport | None = None
+) -> int:
     """Aggregate and write element rows; return the number of rows written.
 
     In dry-run mode nothing is written; the row count that *would* be written is returned.
+    Rows TM1 refuses are skipped and recorded in ``report``.
     """
     grouped = aggregate(rows)
     if client.dry_run:
@@ -148,22 +145,17 @@ def write_element_lineage(client: TM1Client, rows: list[ElementRow]) -> int:
         return 0
     client.ensure_writable("write }Meta_Process_Element")
     service = client.service
-    _ensure_elements(service, DIM_PROCESS, {r.process for r, _ in grouped})
-    _ensure_elements(service, DIM_CUBE, {r.cube for r, _ in grouped})
-    _ensure_elements(service, DIM_DIMENSION, {r.dimension for r, _ in grouped})
-    _ensure_elements(service, DIM_ELEMENT, {r.element for r, _ in grouped})
-    _ensure_elements(service, DIM_PROCESS_ELEMENT_ROLE, {r.role for r, _ in grouped}, STRING)
-    cellset: dict[tuple[str, ...], object] = {}
-    for row, count in grouped:
-        base = row.key
-        cellset[(*base, "Count")] = count
-        cellset[(*base, "FirstBlock")] = row.block
-        cellset[(*base, "FirstLine")] = row.line_no
-        cellset[(*base, "Function")] = row.function
-        cellset[(*base, "Kind")] = row.kind
-        cellset[(*base, "Confidence")] = row.confidence
-        cellset[(*base, "Expression")] = row.expression
-        cellset[(*base, "ElementExists")] = row.element_exists
-        cellset[(*base, "Statement")] = row.statement
-    service.cells.write(cube_name=CUBE_PROCESS_ELEMENT, cellset_as_dict=cellset)
-    return len(grouped)
+    safe_rows = build_rows(grouped)
+    element_cls = _load_element_class()
+    dims = (DIM_PROCESS, DIM_CUBE, DIM_DIMENSION, DIM_ELEMENT, DIM_PROCESS_ELEMENT_ROLE)
+    for position, dimension in enumerate(dims):
+        element_type = STRING if dimension == DIM_PROCESS_ELEMENT_ROLE else NUMERIC
+        ensure_elements(
+            service,
+            element_cls,
+            dimension,
+            {key[position] for key, _ in safe_rows},
+            element_type=element_type,
+            report=report,
+        )
+    return write_rows(service, CUBE_PROCESS_ELEMENT, safe_rows, report=report)

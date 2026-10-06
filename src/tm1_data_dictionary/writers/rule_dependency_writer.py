@@ -1,4 +1,4 @@
-﻿"""Write cross-cube rule dependencies into the ``}Meta_Rule_Dependency`` cube.
+"""Write cross-cube rule dependencies into the ``}Meta_Rule_Dependency`` cube.
 
 Consumes aggregated :class:`~tm1_data_dictionary.parser.rules.rule_dependencies.DependencyRow`
 objects - one per (cube, related cube, dependency type) - so a developer or administrator
@@ -18,6 +18,10 @@ Measures:
     FirstStatement     - the first referencing statement (truncated)
     RelatedCubeExists  - Yes | No; No means a dangling reference
 
+The related cube name comes from a ``DB()`` literal in rule text, so it is passed through
+:func:`~tm1_data_dictionary.writers.safe_write.safe_name` before it becomes an element.
+Cells are written in batches; a row TM1 still refuses is skipped and reported.
+
 Guarded by ``ensure_writable`` (dry-run safe); TM1py imported lazily; element creation is
 idempotent. Mirrors the other writers.
 """
@@ -33,6 +37,12 @@ from tm1_data_dictionary.schema import (
     DIM_RULE_RELATED_CUBE,
 )
 from tm1_data_dictionary.tm1_client import TM1Client
+from tm1_data_dictionary.writers.safe_write import (
+    WriteReport,
+    ensure_elements,
+    safe_name,
+    write_rows,
+)
 
 NUMERIC = "Numeric"
 
@@ -53,44 +63,36 @@ def clear_rule_dependency(client: TM1Client) -> None:
 def write_rule_dependencies(
     client: TM1Client,
     rows: list[DependencyRow],
+    report: WriteReport | None = None,
 ) -> int:
     """Write aggregated rule dependencies; return the number of rows written.
 
     In dry-run mode nothing is written; the row count that *would* be written is returned.
+    Rows TM1 refuses are skipped and recorded in ``report``.
     """
     if client.dry_run:
         return len(rows)
-
     if not rows:
         return 0
-
     client.ensure_writable("write rule dependencies")
     service = client.service
     element_cls = _load_element_class()
-
-    for cube_name in sorted({row.cube for row in rows}):
-        if not service.elements.exists(DIM_CUBE, DIM_CUBE, cube_name):
-            service.elements.create(DIM_CUBE, DIM_CUBE, element_cls(cube_name, NUMERIC))
-
-    for related in sorted({row.related_cube for row in rows}):
-        if not service.elements.exists(DIM_RULE_RELATED_CUBE, DIM_RULE_RELATED_CUBE, related):
-            service.elements.create(
-                DIM_RULE_RELATED_CUBE,
-                DIM_RULE_RELATED_CUBE,
-                element_cls(related, NUMERIC),
-            )
-
-    cellset: dict[tuple[str, str, str, str], object] = {}
+    safe_rows: list[tuple[tuple[str, ...], dict[str, object]]] = []
     for row in rows:
-        key = (row.cube, row.related_cube, row.dependency_type.value)
-        cellset[(*key, "Count")] = row.count
-        cellset[(*key, "FirstLine")] = row.first_line
-        cellset[(*key, "FirstStatement")] = row.first_statement
-        cellset[(*key, "RelatedCubeExists")] = "Yes" if row.related_cube_exists else "No"
-
-    service.cells.write(
-        cube_name=CUBE_RULE_DEPENDENCY,
-        cellset_as_dict=cellset,
+        key = (safe_name(row.cube), safe_name(row.related_cube), row.dependency_type.value)
+        safe_rows.append(
+            (
+                key,
+                {
+                    "Count": row.count,
+                    "FirstLine": row.first_line,
+                    "FirstStatement": safe_name(row.first_statement),
+                    "RelatedCubeExists": "Yes" if row.related_cube_exists else "No",
+                },
+            )
+        )
+    ensure_elements(service, element_cls, DIM_CUBE, {k[0] for k, _ in safe_rows}, report=report)
+    ensure_elements(
+        service, element_cls, DIM_RULE_RELATED_CUBE, {k[1] for k, _ in safe_rows}, report=report
     )
-
-    return len(rows)
+    return write_rows(service, CUBE_RULE_DEPENDENCY, safe_rows, report=report)

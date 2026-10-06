@@ -108,3 +108,62 @@ def test_clear() -> None:
     client = _Client()
     writer.clear_rule_element_reference(client)  # type: ignore[arg-type]
     assert client.service.cells.cleared == [CUBE_RULE_ELEMENT_REFERENCE]
+
+
+def _typo_row() -> ElementReferenceRow:
+    return ElementReferenceRow(
+        cube="Funding",
+        dimension="(Unknown)",
+        element="av\ng\n",
+        reference_type=ReferenceType.RULE_REFERENCE,
+        count=1,
+        first_line=12,
+        first_statement="['x'] = ['av\ng\n'] * 2;",
+        element_exists="No",
+        candidates="",
+        written_as="av\ng\n",
+        target_cubes=["Funding"],
+    )
+
+
+def test_line_break_in_rule_element_is_written_as_a_visible_broken_reference() -> None:
+    client = _Client()
+    rows = [_row(), _typo_row()]
+    assert writer.write_rule_element_references(client, rows) == 2  # type: ignore[arg-type]
+    assert "av<LF>g<LF>" in client.service.elements.created[DIM_ELEMENT]
+    cells = client.service.cells.written[CUBE_RULE_ELEMENT_REFERENCE]
+    key = ("Funding", "(Unknown)", "av<LF>g<LF>", "RuleReference")
+    assert cells[key + ("ElementExists",)] == "No"
+    assert cells[key + ("WrittenAs",)] == "av<LF>g<LF>"
+    assert "<LF>" in cells[key + ("FirstStatement",)]
+    assert "hidden characters (<LF>)" in cells[key + ("Candidates",)]
+
+
+def test_names_that_coincide_after_cleaning_are_merged() -> None:
+    a = _typo_row()
+    b = ElementReferenceRow(**{**a.__dict__, "element": "AV<LF>G<LF>", "count": 2})
+    built = writer.build_rows([a, b])
+    assert len(built) == 1
+    assert built[0][1]["Count"] == 3
+
+
+def test_a_row_tm1_refuses_does_not_lose_the_others() -> None:
+    from tm1_data_dictionary.writers.safe_write import WriteReport
+
+    client = _Client()
+    good = client.service.cells.write
+
+    def picky(cube_name: str, cellset_as_dict: dict) -> None:
+        if any(k[2] == "av<LF>g<LF>" for k in cellset_as_dict):
+            raise RuntimeError("member not found")
+        good(cube_name, cellset_as_dict)
+
+    client.service.cells.write = picky  # type: ignore[method-assign]
+    report = WriteReport()
+    written = writer.write_rule_element_references(
+        client, [_row(), _typo_row()], report  # type: ignore[arg-type]
+    )
+    assert written == 1
+    assert report.rows_not_written == 1
+    cells = client.service.cells.written[CUBE_RULE_ELEMENT_REFERENCE]
+    assert cells[("General Ledger", "Currency", "Local", "Area", "Count")] == 3

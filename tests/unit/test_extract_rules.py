@@ -113,7 +113,7 @@ def written(monkeypatch: pytest.MonkeyPatch) -> dict:
         return lambda _c: state["cleared"].append(name)
 
     def _writer(key: str):  # noqa: ANN202
-        def _w(_c, rows):  # noqa: ANN001, ANN202
+        def _w(_c, rows, *_args: object, **_kwargs: object):  # noqa: ANN001, ANN202
             state[key].append(list(rows))
             return len(rows)
 

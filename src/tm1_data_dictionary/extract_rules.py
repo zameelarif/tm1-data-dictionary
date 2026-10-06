@@ -16,6 +16,9 @@ Design principles (unchanged from the TI orchestrator):
 - One malformed/unreadable cube does not abort the full extraction.
 - Target rule cubes are cleared once before writing.
 - Dry-run performs reading and reporting without clearing or writing.
+- One name TM1 refuses (e.g. a line break typed inside a quoted element name) never stops
+  the write: names are made visible, and rows that still fail are skipped and listed under
+  "Rows not written" in the summary.
 
 Phase 2c resolves elements *after* every cube has been read, because a rule can reference
 a cube that is read later in the loop. Dimensions are read once each and cached.
@@ -73,6 +76,7 @@ from tm1_data_dictionary.writers.rule_function_writer import (
     clear_rule_function,
     write_rule_functions,
 )
+from tm1_data_dictionary.writers.safe_write import WriteReport
 
 # A progress callback receives:
 # current index, total count, cube name, and cube status.
@@ -124,6 +128,7 @@ class RuleExtractionSummary:
     failed_names: list[tuple[str, str]] = field(default_factory=list)
     failed_dimensions: dict[str, str] = field(default_factory=dict)
     alias_errors: dict[str, list[str]] = field(default_factory=dict)
+    write_report: WriteReport = field(default_factory=WriteReport)
     dry_run: bool = False
 
     def as_lines(self) -> list[str]:
@@ -176,6 +181,7 @@ class RuleExtractionSummary:
                 "TM1 lookup limit reached - some elements were not double-checked "
                 "and may be falsely reported missing"
             )
+        lines.extend(self.write_report.as_lines())
         if self.malformed_statements:
             lines.append(f"Malformed statements: {self.malformed_statements}")
         if self.failed_dimensions:
@@ -358,8 +364,11 @@ def extract_all_rules(
         return summary
 
     summary.rule_cube_rows_written = write_rule_cube(client, cube_rows)
-    summary.rule_dependency_rows_written = write_rule_dependencies(client, dependency_rows)
-    summary.element_reference_rows_written = write_rule_element_references(client, element_rows)
+    report = summary.write_report
+    summary.rule_dependency_rows_written = write_rule_dependencies(client, dependency_rows, report)
+    summary.element_reference_rows_written = write_rule_element_references(
+        client, element_rows, report
+    )
     summary.rule_function_rows_written = write_rule_functions(client, function_rows)
     summary.feeder_finding_rows_written = write_rule_feeder_findings(client, finding_rows)
     return summary
