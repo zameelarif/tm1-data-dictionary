@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from types import ModuleType
 
 import pytest
@@ -185,7 +185,7 @@ def test_record_rejects_non_numeric_metric(value: object) -> None:
 
 
 def test_new_run_id_is_iso_utc_to_the_second() -> None:
-    clock = _fixed_clock(datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC))
+    clock = _fixed_clock(datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc))
     writer = AuditWriter(TM1Client(_config(), service=_FakeService()), clock=clock)
     assert writer.new_run_id() == RUN_ID
 
@@ -287,8 +287,8 @@ def test_cell_write_failure_is_wrapped(fake_tm1py_element: None) -> None:
 
 
 def test_record_run_computes_duration_and_writes(fake_tm1py_element: None) -> None:
-    start = datetime(2026, 7, 9, 2, 14, 13, tzinfo=UTC)
-    end = datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC)  # 47 seconds later
+    start = datetime(2026, 7, 9, 2, 14, 13, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc)  # 47 seconds later
     service = _FakeService()
     writer = AuditWriter(TM1Client(_config(), service=service), clock=_fixed_clock(end))
     rec = writer.record_run(
@@ -306,7 +306,7 @@ def test_record_run_computes_duration_and_writes(fake_tm1py_element: None) -> No
 
 def test_record_run_writes_extract_rules_metrics(fake_tm1py_element: None) -> None:
     # The metrics 'extract-rules' passes were previously dropped.
-    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc)
     service = _FakeService()
     writer = AuditWriter(TM1Client(_config(), service=service), clock=_fixed_clock(now))
     rec = writer.record_run(
@@ -323,7 +323,7 @@ def test_record_run_writes_extract_rules_metrics(fake_tm1py_element: None) -> No
 
 
 def test_record_run_does_not_keep_callers_dict(fake_tm1py_element: None) -> None:
-    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc)
     metrics = {"cube_rows": 1}
     writer = AuditWriter(TM1Client(_config(), service=_FakeService()), clock=_fixed_clock(now))
     rec = writer.record_run(
@@ -334,15 +334,15 @@ def test_record_run_does_not_keep_callers_dict(fake_tm1py_element: None) -> None
 
 
 def test_record_run_duration_never_negative(fake_tm1py_element: None) -> None:
-    start = datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC)
-    end = datetime(2026, 7, 9, 2, 14, 0, tzinfo=UTC)
+    start = datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 9, 2, 14, 0, tzinfo=timezone.utc)
     writer = AuditWriter(TM1Client(_config(), service=_FakeService()), clock=_fixed_clock(end))
     rec = writer.record_run(extractor_version="0.1.0", schema_version="1.4", start_time=start)
     assert rec.duration_seconds == 0.0
 
 
 def test_record_run_defaults(fake_tm1py_element: None) -> None:
-    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 9, 2, 15, 0, tzinfo=timezone.utc)
     writer = AuditWriter(TM1Client(_config(), service=_FakeService()), clock=_fixed_clock(now))
     rec = writer.record_run(extractor_version="0.1.0", schema_version="1.4", start_time=now)
     assert rec.exit_status == "Success"

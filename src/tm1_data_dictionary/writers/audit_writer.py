@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from tm1_data_dictionary.tm1_client import TM1Client
@@ -78,7 +78,7 @@ def metric_measure_name(key: str) -> str:
 
 def _utc_now() -> datetime:
     """Return the current time in UTC."""
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _load_element_class() -> Any:
@@ -95,8 +95,8 @@ def _as_utc(value: datetime) -> datetime:
     tests that provide a datetime without timezone information.
     """
     if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _numeric(key: str, value: object) -> int | float:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import getpass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -407,7 +407,7 @@ def record_run(config_path: str, environment: str | None, status: str) -> None:
     """
     cfg = _load(config_path, environment)
     _echo_env(cfg)
-    start = datetime.now(UTC)
+    start = datetime.now(timezone.utc)
     try:
         with TM1Client(cfg) as client:
             writer = AuditWriter(client)
@@ -705,7 +705,7 @@ def extract(
         if not quiet:
             click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
 
-    start = datetime.now(UTC)
+    start = datetime.now(timezone.utc)
     run_by = f"{getpass.getuser()} via {cfg.connection.user}"
     audit_recorded = False
 
@@ -807,7 +807,7 @@ def extract_rules_cmd(config_path: str, environment: str | None, quiet: bool) ->
         if not quiet:
             click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
 
-    start = datetime.now(UTC)
+    start = datetime.now(timezone.utc)
     run_by = f"{getpass.getuser()} via {cfg.connection.user}"
     audit_recorded = False
 
@@ -926,7 +926,7 @@ def extract_elements_cmd(
         if not quiet:
             click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
 
-    start = datetime.now(UTC)
+    start = datetime.now(timezone.utc)
     run_by = f"{getpass.getuser()} via {cfg.connection.user}"
     audit_recorded = False
     base = Path(config_path).parent
