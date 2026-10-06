@@ -69,6 +69,8 @@ def check_config(
         cfg = loader(config_path, environment=environment)
     except ConfigError as exc:
         return CheckResult(CHECK_CONFIG, False, str(exc)), None
+    except Exception as exc:  # noqa: BLE001 - never crash the diagnostic on a bad file
+        return CheckResult(CHECK_CONFIG, False, f"{type(exc).__name__}: {exc}"), None
     label = cfg.environment or "default environment"
     return CheckResult(CHECK_CONFIG, True, f"{config_path} loaded ({label})"), cfg
 

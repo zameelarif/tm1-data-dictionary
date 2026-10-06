@@ -330,6 +330,57 @@ def _select_environment(
 
 
 # --------------------------------------------------------------------------- #
+# Reading the file
+# --------------------------------------------------------------------------- #
+
+
+def _read_yaml(config_path: Path) -> dict:
+    """Parse config.yaml into a mapping, turning YAML syntax errors into ConfigError.
+
+    A BOM (written by some Windows editors) is accepted. The error names the file, line
+    and column and adds the most common fix, instead of a parser traceback.
+    """
+    try:
+        with open(config_path, encoding="utf-8-sig") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except yaml.YAMLError as exc:
+        where = ""
+        mark = getattr(exc, "problem_mark", None)
+        if mark is not None:
+            where = f" at line {mark.line + 1}, column {mark.column + 1}"
+        problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+        raise ConfigError(
+            f"{config_path.name} is not valid YAML{where}: {problem}. "
+            "Check that line and the one above it: a key with sub-keys must end with ':' "
+            "and nothing after it; indent with spaces, not tabs; quote values that "
+            "contain ':' or '#'."
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ConfigError("config.yaml must contain a top-level mapping.")
+    return raw
+
+
+def list_environments(config_path: str | Path) -> list[str]:
+    """Return the environment names in config.yaml, in file order.
+
+    A legacy single-block file (no ``environments`` section) returns an empty list.
+
+    Raises:
+        ConfigError: if the file is missing or not valid YAML, or ``environments`` is
+            not a mapping.
+    """
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise ConfigError(f"config.yaml not found at: {config_path}")
+    environments = _read_yaml(config_path).get("environments")
+    if environments is None:
+        return []
+    if not isinstance(environments, dict):
+        raise ConfigError("'environments' in config.yaml must be a non-empty mapping.")
+    return [str(name) for name in environments]
+
+
+# --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
 def load_config(
@@ -367,11 +418,7 @@ def load_config(
         if sibling.exists():
             load_dotenv(sibling)
 
-    with open(config_path, encoding="utf-8") as fh:
-        raw: dict = yaml.safe_load(fh) or {}
-
-    if not isinstance(raw, dict):
-        raise ConfigError("config.yaml must contain a top-level mapping.")
+    raw = _read_yaml(config_path)
 
     block, env_name = _select_environment(raw, environment)
 

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import getpass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from tm1_data_dictionary.bootstrap import (
     plan_rebuild,
 )
 from tm1_data_dictionary.chore_reader import ChoreReader
-from tm1_data_dictionary.config import ConfigError, load_config
+from tm1_data_dictionary.config import ConfigError, list_environments, load_config
 from tm1_data_dictionary.credentials import (
     KEYRING_SERVICE_NAME,
     CredentialError,
@@ -1028,6 +1031,268 @@ def where_cmd(
     if csv_path:
         write_csv(csv_path, rows)
         click.echo(f"Wrote {len(rows)} row(s) to {csv_path}")
+
+
+# --------------------------------------------------------------------------- #
+# tm1dd run - every step, for one or more environments
+# --------------------------------------------------------------------------- #
+
+STEP_BOOTSTRAP = "bootstrap"
+STEP_TI = "ti"
+STEP_RULES = "rules"
+STEP_ELEMENTS = "elements"
+STEP_VIEWS = "views"
+ALL_STEPS: tuple[str, ...] = (STEP_BOOTSTRAP, STEP_TI, STEP_RULES, STEP_ELEMENTS, STEP_VIEWS)
+
+STATUS_OK = "OK"
+STATUS_FAILED = "FAILED"
+STATUS_SKIPPED = "SKIPPED"
+
+
+class StepFailed(click.ClickException):
+    """A run step could not complete (message says what to do)."""
+
+
+def _step_bootstrap(
+    ctx: click.Context, config_path: str, environment: str | None, quiet: bool
+) -> None:
+    """Check the schema first; create what is missing, but never rebuild on its own."""
+    cfg = _load(config_path, environment)
+    env_flag = f" --env {cfg.environment}" if cfg.environment else ""
+    try:
+        with TM1Client(cfg) as client:
+            rebuild = check_schema(client).cubes_to_rebuild
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if rebuild:
+        raise StepFailed(
+            f"{len(rebuild)} cube(s) need a rebuild, which 'run' never does on its own. "
+            f"Review, then run: {_rebuild_hint(rebuild, env_flag)}"
+        )
+    ctx.invoke(
+        bootstrap,
+        config_path=config_path,
+        environment=environment,
+        check_only=False,
+        rebuild_cubes=(),
+        assume_yes=False,
+        drop_legacy=False,
+    )
+
+
+def _step_ti(ctx: click.Context, config_path: str, environment: str | None, quiet: bool) -> None:
+    ctx.invoke(
+        extract, config_path=config_path, environment=environment, functions_file=None, quiet=quiet
+    )
+
+
+def _step_rules(ctx: click.Context, config_path: str, environment: str | None, quiet: bool) -> None:
+    ctx.invoke(extract_rules_cmd, config_path=config_path, environment=environment, quiet=quiet)
+
+
+def _step_elements(
+    ctx: click.Context, config_path: str, environment: str | None, quiet: bool
+) -> None:
+    ctx.invoke(
+        extract_elements_cmd,
+        config_path=config_path,
+        environment=environment,
+        elements_file=None,
+        signatures_file=None,
+        quiet=quiet,
+    )
+
+
+def _step_views(ctx: click.Context, config_path: str, environment: str | None, quiet: bool) -> None:
+    ctx.invoke(
+        create_views_cmd, config_path=config_path, environment=environment, prefix=DEFAULT_PREFIX
+    )
+
+
+StepRunner = Callable[[click.Context, str, "str | None", bool], None]
+
+# Looked up at run time, so tests can replace individual steps.
+STEP_RUNNERS: dict[str, StepRunner] = {
+    STEP_BOOTSTRAP: _step_bootstrap,
+    STEP_TI: _step_ti,
+    STEP_RULES: _step_rules,
+    STEP_ELEMENTS: _step_elements,
+    STEP_VIEWS: _step_views,
+}
+
+STEP_LABELS = {
+    STEP_BOOTSTRAP: "bootstrap",
+    STEP_TI: "extract (TI lineage)",
+    STEP_RULES: "extract-rules",
+    STEP_ELEMENTS: "extract-elements",
+    STEP_VIEWS: "create-views",
+}
+
+
+@dataclass
+class StepResult:
+    environment: str
+    step: str
+    status: str
+    seconds: float = 0.0
+    message: str = ""
+
+
+def _parse_steps(text: str, option: str) -> list[str]:
+    names = [part.strip().lower() for part in text.split(",") if part.strip()]
+    unknown = [n for n in names if n not in ALL_STEPS]
+    if unknown:
+        raise click.UsageError(
+            f"{option}: unknown step(s) {', '.join(unknown)}. Choose from: {', '.join(ALL_STEPS)}"
+        )
+    return names
+
+
+def select_steps(only: str | None, skip: str | None) -> list[str]:
+    """Return the steps to run, in the fixed order of ALL_STEPS."""
+    if only and skip:
+        raise click.UsageError("Use --only or --skip, not both.")
+    if only:
+        chosen = set(_parse_steps(only, "--only"))
+        return [s for s in ALL_STEPS if s in chosen]
+    dropped = set(_parse_steps(skip, "--skip")) if skip else set()
+    steps = [s for s in ALL_STEPS if s not in dropped]
+    if not steps:
+        raise click.UsageError("--skip removed every step; nothing to run.")
+    return steps
+
+
+def _environments_to_run(
+    config_path: str, environments: tuple[str, ...], all_envs: bool
+) -> list[str | None]:
+    if all_envs and environments:
+        raise click.UsageError("Use --env or --all-envs, not both.")
+    if all_envs:
+        try:
+            names = list_environments(config_path)
+        except ConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if not names:
+            raise click.UsageError("--all-envs: config.yaml has no 'environments' section.")
+        return list(names)
+    if environments:
+        return list(dict.fromkeys(environments))  # keep order, drop repeats
+    return [None]  # default_environment (or the legacy single block)
+
+
+def _print_run_summary(results: list[StepResult]) -> None:
+    click.echo("")
+    click.echo("Run summary")
+    click.echo(f"  {'ENVIRONMENT':<20} {'STEP':<22} {'STATUS':<8} {'TIME':>8}  NOTE")
+    click.echo(f"  {'-' * 20} {'-' * 22} {'-' * 8} {'-' * 8}  {'-' * 30}")
+    for r in results:
+        secs = f"{r.seconds:.1f}s" if r.status != STATUS_SKIPPED else ""
+        click.echo(
+            f"  {r.environment:<20} {STEP_LABELS[r.step]:<22} {r.status:<8} {secs:>8}  {r.message}"
+        )
+
+
+@main.command(name="run")
+@_config_option
+@click.option(
+    "--env",
+    "environments",
+    multiple=True,
+    metavar="NAME",
+    help="Environment to run (repeatable). Default: default_environment.",
+)
+@click.option(
+    "--all-envs", is_flag=True, default=False, help="Run every environment in config.yaml."
+)
+@click.option(
+    "--only",
+    default=None,
+    metavar="STEPS",
+    help=f"Comma-separated steps to run: {','.join(ALL_STEPS)}.",
+)
+@click.option("--skip", default=None, metavar="STEPS", help="Comma-separated steps to leave out.")
+@click.option(
+    "--keep-going",
+    is_flag=True,
+    default=False,
+    help="After a failed step, carry on with the remaining steps for that environment.",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-process and per-cube progress lines in the extract steps.",
+)
+@click.pass_context
+def run_cmd(
+    ctx: click.Context,
+    config_path: str,
+    environments: tuple[str, ...],
+    all_envs: bool,
+    only: str | None,
+    skip: str | None,
+    keep_going: bool,
+    quiet: bool,
+) -> None:
+    """Run bootstrap, extract, extract-rules, extract-elements and create-views in one go.
+
+    \b
+    Steps (always in this order): bootstrap, ti, rules, elements, views.
+      tm1dd run --env prod                      everything for one environment
+      tm1dd run --env a --env b                 several environments, one after another
+      tm1dd run --all-envs --quiet              every environment in config.yaml
+      tm1dd run --env prod --only ti,rules      just these steps
+      tm1dd run --env prod --skip elements      everything except these
+
+    Bootstrap only adds what is missing and never deletes. If a cube needs a rebuild,
+    the environment stops and the exact 'bootstrap --rebuild-cube' command is shown.
+    A failed step stops that environment (unless --keep-going); the next environment
+    still runs. Exits non-zero if any step failed, for Task Scheduler. Every step can
+    still be run on its own with its own command.
+    """
+    steps = select_steps(only, skip)
+    targets = _environments_to_run(config_path, environments, all_envs)
+    results: list[StepResult] = []
+    for environment in targets:
+        label = environment or "(default)"
+        click.echo("")
+        click.secho(f"=== {label}: {', '.join(steps)} ===", bold=True)
+        failed = False
+        for step in steps:
+            if failed and not keep_going:
+                results.append(StepResult(label, step, STATUS_SKIPPED, message="earlier failure"))
+                continue
+            click.echo("")
+            click.secho(f"--- {label}: {STEP_LABELS[step]} ---", bold=True)
+            started = time.perf_counter()
+            try:
+                STEP_RUNNERS[step](ctx, config_path, environment, quiet)
+            except (click.ClickException, click.exceptions.Abort) as exc:
+                message = (
+                    exc.format_message() if isinstance(exc, click.ClickException) else "aborted"
+                )
+                click.secho(f"  {STEP_LABELS[step]} failed: {message}", fg="red")
+                results.append(
+                    StepResult(label, step, STATUS_FAILED, time.perf_counter() - started, message)
+                )
+                failed = True
+            except Exception as exc:  # noqa: BLE001 - one step never stops other environments
+                message = f"{type(exc).__name__}: {exc}"
+                click.secho(f"  {STEP_LABELS[step]} failed: {message}", fg="red")
+                results.append(
+                    StepResult(label, step, STATUS_FAILED, time.perf_counter() - started, message)
+                )
+                failed = True
+            else:
+                results.append(StepResult(label, step, STATUS_OK, time.perf_counter() - started))
+    _print_run_summary(results)
+    failures = [r for r in results if r.status == STATUS_FAILED]
+    if failures:
+        raise click.ClickException(
+            f"{len(failures)} step(s) failed. Fix the cause, then re-run just those steps "
+            "with --only."
+        )
+    click.echo("All steps completed.")
 
 
 @main.command(name="diagnose-unresolved")
