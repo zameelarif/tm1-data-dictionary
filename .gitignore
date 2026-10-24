@@ -50,3 +50,10 @@ vis-network.min.js
 
 #releae files
 release/
+
+bundle_*.txt
+meta_export_*/
+meta_export_*.zip
+demo_cheatsheet.md
+tools/
+tm1dd_bundle.txt

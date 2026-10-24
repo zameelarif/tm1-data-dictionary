@@ -42,6 +42,7 @@ from tm1_data_dictionary.schema import (
     process_dimension_schema,
     process_element_schema,
     process_function_schema,
+    process_output_schema,
     rule_cube_schema,
     rule_dependency_schema,
     rule_element_reference_schema,
@@ -67,6 +68,7 @@ ALL_SCHEMAS: tuple[Callable[[], SchemaDef], ...] = (
     rule_function_schema,
     rule_feeder_finding_schema,
     process_element_schema,
+    process_output_schema,
 )
 
 SEED_ELEMENT_NAME = "_Init"

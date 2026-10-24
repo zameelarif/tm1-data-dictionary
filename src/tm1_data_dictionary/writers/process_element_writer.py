@@ -71,7 +71,8 @@ class ElementRow:
     confidence: str
     expression: str = ""
     statement: str = ""
-    element_exists: str = "Unknown"  # Yes | No | Unknown
+    element_exists: str = "Unknown"  # Yes | No | Unknown | CreatedByProcess | InAlternateHierarchy
+    hierarchy: str = ""  # hierarchy named in the call; used for the existence check, not stored
 
     @property
     def key(self) -> tuple[str, str, str, str, str]:

@@ -55,6 +55,7 @@ _SCHEMAS = (
     s.rule_function_schema,
     s.rule_feeder_finding_schema,
     s.process_element_schema,
+    s.process_output_schema,
 )
 CUBE_DIMENSIONS: dict[str, tuple[str, ...]] = {
     cube.name: cube.dimensions for build in _SCHEMAS for cube in build().cubes
@@ -74,6 +75,7 @@ ANCHOR_MEASURE: dict[str, str] = {
     s.CUBE_RULE_FUNCTION: "Count",
     s.CUBE_RULE_FEEDER_FINDING: "Count",
     s.CUBE_PROCESS_ELEMENT: "Count",
+    s.CUBE_PROCESS_OUTPUT: "Count",
 }
 
 ALL = "All"
@@ -99,6 +101,7 @@ VIEWS: tuple[ViewDef, ...] = (
     _default(s.CUBE_RULE_FUNCTION, "rule function usage"),
     _default(s.CUBE_RULE_FEEDER_FINDING, "feeder findings"),
     _default(s.CUBE_PROCESS_ELEMENT, "element-level TI lineage"),
+    _default(s.CUBE_PROCESS_OUTPUT, "files, databases and commands TI processes write to"),
     # ---- TI case views ---------------------------------------------------------------
     ViewDef(
         s.CUBE_PROCESS_CUBE,
@@ -160,6 +163,31 @@ VIEWS: tuple[ViewDef, ...] = (
         "Watch-list Unexplained",
         "Watched elements found where tm1dd could not say how they are used",
         pin=((s.DIM_PROCESS_ELEMENT_ROLE, "Unexplained"),),
+    ),
+    # ---- Export case views -----------------------------------------------------------
+    ViewDef(
+        s.CUBE_PROCESS_OUTPUT,
+        "File Exports",
+        "Which process writes which file",
+        pin=((s.DIM_OUTPUT_TYPE, "File"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_OUTPUT,
+        "ODBC Exports",
+        "Which process writes to which database (DSN)",
+        pin=((s.DIM_OUTPUT_TYPE, "ODBC"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_OUTPUT,
+        "Shell Commands",
+        "Which process runs which command line",
+        pin=((s.DIM_OUTPUT_TYPE, "Command"),),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_OUTPUT,
+        "Runtime Exports",
+        "Exports whose target is only known when the process runs",
+        where=("Resolved", "Runtime"),
     ),
     # ---- Rules case views ------------------------------------------------------------
     ViewDef(

@@ -33,6 +33,7 @@ from tm1_data_dictionary.element_index import (
     ElementIndex,
     tm1_element_loader,
     tm1_element_resolver,
+    tm1_hierarchy_loader,
 )
 from tm1_data_dictionary.hierarchy_index import HierarchyIndex, tm1_edge_loader
 from tm1_data_dictionary.parser.rules.rule_dependencies import (
@@ -106,6 +107,7 @@ class RuleExtractionSummary:
     malformed_statements: int = 0  # statements whose area/'=' structure was not recognised
     element_references: int = 0  # every literal element name found
     missing_elements: int = 0  # element-reference rows with ElementExists = No
+    alternate_hierarchy_elements: int = 0  # rows whose element is only in an alternate hierarchy
     ambiguous_elements: int = 0  # rows whose element is in more than one dimension
     unchecked_elements: int = 0  # rows with ElementExists = Unknown
     dimensions_read: int = 0
@@ -154,6 +156,7 @@ class RuleExtractionSummary:
             f"Dangling dependencies (cube not found): {self.dangling_dependencies}",
             f"Element references: {self.element_references}",
             f"Element rows - missing element: {self.missing_elements}",
+            f"Element rows - only in an alternate hierarchy: {self.alternate_hierarchy_elements}",
             f"Element rows - ambiguous dimension: {self.ambiguous_elements}",
             f"Element rows - not checked: {self.unchecked_elements}",
             f"Dimensions read for element checks: {self.dimensions_read}",
@@ -247,7 +250,11 @@ def extract_all_rules(
     """
     rules = rules or RuleExclusionRules.default()
     reader = RuleReader(client)
-    index = element_index or ElementIndex(tm1_element_loader(client), tm1_element_resolver(client))
+    index = element_index or ElementIndex(
+        tm1_element_loader(client),
+        tm1_element_resolver(client),
+        hierarchy_loader=tm1_hierarchy_loader(client),
+    )
     hierarchy = hierarchy_index or HierarchyIndex(tm1_edge_loader(client))
     summary = RuleExtractionSummary(dry_run=client.dry_run)
 
@@ -323,6 +330,7 @@ def extract_all_rules(
     element_rows = list(element_rollup.rows)
     summary.element_references = len(all_element_refs)
     summary.missing_elements = element_rollup.missing_count
+    summary.alternate_hierarchy_elements = element_rollup.alternate_count
     summary.ambiguous_elements = element_rollup.ambiguous_count
     summary.unchecked_elements = element_rollup.unknown_count
     summary.dimensions_read = index.dimensions_loaded

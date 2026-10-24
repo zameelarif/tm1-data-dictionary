@@ -23,7 +23,14 @@ spacing. The lookup is layered so that one failing TM1 call never turns into a f
 
 Every problem is recorded rather than raised: an unreadable dimension is reported as
 unavailable (references become ElementExists = Unknown), and alias read failures are
-listed in the run summary. Only the default hierarchy (same name as the dimension) is read.
+listed in the run summary.
+
+**Hierarchies.** Layers 1-3 work on the default hierarchy (same name as the dimension). An
+element missing from it may still exist in an *alternate* hierarchy - a consolidation that
+lives only there is not a deleted element. Alternate hierarchies are therefore read lazily,
+once per dimension, and only when an element was not found: :meth:`find_in_other_hierarchies`
+answers "is it somewhere else?" and :meth:`lookup_in_hierarchy` checks the hierarchy a TI call
+names. Element names are matched; aliases of alternate hierarchies are not read.
 """
 
 from __future__ import annotations
@@ -39,6 +46,10 @@ ElementLoader = Callable[[str], dict[str, str]]
 
 # Resolver: (dimension, element as written) -> principal name, or None if not found.
 ElementResolver = Callable[[str, str], "str | None"]
+
+# Hierarchy loader: dimension name -> {hierarchy name: {normalised element name: principal}}
+# for every hierarchy except the default one (and the built-in Leaves hierarchy).
+HierarchyLoader = Callable[[str], dict[str, dict[str, str]]]
 
 # Maximum fallback queries per run (protects large models with many missing elements).
 DEFAULT_MAX_FALLBACK_QUERIES = 500
@@ -174,6 +185,57 @@ class TM1ElementLoader:
         return mapping
 
 
+class TM1HierarchyLoader:
+    """Read the element names of a dimension's alternate hierarchies.
+
+    One small call lists the hierarchies; only the ones that are not the default or Leaves
+    are read, each in one REST call (TM1py as the fallback). Callable as a
+    :data:`HierarchyLoader`.
+    """
+
+    def __init__(self, service: Any) -> None:
+        self._service = service
+
+    def _rest(self) -> Any:
+        rest = getattr(self._service.elements, "_rest", None)
+        return rest if rest is not None and hasattr(rest, "GET") else None
+
+    def _hierarchy_names(self, dimension: str) -> list[str]:
+        rest = self._rest()
+        if rest is not None:
+            quoted = quote(dimension.replace("'", "''"), safe="")
+            try:
+                payload = rest.GET(f"/Dimensions('{quoted}')/Hierarchies?$select=Name").json()
+                return [str(h["Name"]) for h in payload.get("value", []) if h.get("Name")]
+            except Exception:  # noqa: BLE001 - fall back to TM1py
+                pass
+        return [str(n) for n in self._service.hierarchies.get_all_names(dimension)]
+
+    def _element_names(self, dimension: str, hierarchy: str) -> list[str]:
+        rest = self._rest()
+        if rest is not None:
+            dim = quote(dimension.replace("'", "''"), safe="")
+            hier = quote(hierarchy.replace("'", "''"), safe="")
+            url = f"/Dimensions('{dim}')/Hierarchies('{hier}')/Elements?$select=Name"
+            try:
+                payload = rest.GET(url).json()
+                return [str(e["Name"]) for e in payload.get("value", []) if e.get("Name")]
+            except Exception:  # noqa: BLE001 - fall back to TM1py
+                pass
+        return [str(n) for n in self._service.elements.get_element_names(dimension, hierarchy)]
+
+    def __call__(self, dimension: str) -> dict[str, dict[str, str]]:
+        result: dict[str, dict[str, str]] = {}
+        skip = {_normalise(dimension), "leaves"}
+        for hierarchy in self._hierarchy_names(dimension):
+            if _normalise(hierarchy) in skip:
+                continue
+            result[hierarchy] = {
+                _normalise(n): n for n in self._element_names(dimension, hierarchy)
+            }
+        return result
+
+
 # --------------------------------------------------------------------------- #
 # Layer 3: TM1 MDX fallback
 # --------------------------------------------------------------------------- #
@@ -233,10 +295,15 @@ class ElementIndex:
         resolver: ElementResolver | None = None,
         *,
         max_fallback_queries: int = DEFAULT_MAX_FALLBACK_QUERIES,
+        hierarchy_loader: HierarchyLoader | None = None,
     ) -> None:
         self._loader = loader
         self._resolver = resolver
         self._max_fallback = max_fallback_queries
+        self._hier_loader = hierarchy_loader
+        # normalised dimension -> {normalised hierarchy: (hierarchy name, {name: principal})}
+        self._hier_cache: dict[str, dict[str, tuple[str, dict[str, str]]] | None] = {}
+        self._hier_failed: dict[str, str] = {}
         self._cache: dict[str, dict[str, str] | None] = {}
         self._fallback_cache: dict[tuple[str, str], str | None] = {}
         self._failed: dict[str, str] = {}  # dimension -> error text
@@ -273,6 +340,54 @@ class ElementIndex:
             if elements is not None:
                 elements.setdefault(key[1], principal)
         return principal
+
+    def _hierarchies(self, dimension: str) -> dict[str, tuple[str, dict[str, str]]] | None:
+        """Alternate hierarchies of a dimension (read once), or None if they cannot be read."""
+        if self._hier_loader is None:
+            return None
+        key = _normalise(dimension)
+        if key not in self._hier_cache:
+            try:
+                loaded = self._hier_loader(dimension)
+                self._hier_cache[key] = {_normalise(h): (h, names) for h, names in loaded.items()}
+            except Exception as exc:  # noqa: BLE001 - isolate per-dimension failures
+                self._hier_cache[key] = None
+                self._hier_failed[dimension] = f"{type(exc).__name__}: {exc}"
+        return self._hier_cache[key]
+
+    def find_in_other_hierarchies(self, dimension: str, element: str) -> tuple[str, str] | None:
+        """Return ``(principal name, hierarchy)`` if the element is in an alternate hierarchy."""
+        hierarchies = self._hierarchies(dimension)
+        if not hierarchies:
+            return None
+        key = _normalise(element)
+        for _norm, (name, names) in sorted(hierarchies.items()):
+            principal = names.get(key)
+            if principal is not None:
+                return principal, name
+        return None
+
+    def hierarchy_available(self, dimension: str, hierarchy: str) -> bool:
+        """Return whether the named hierarchy of the dimension could be read."""
+        if _normalise(hierarchy) == _normalise(dimension):
+            return self.available(dimension)
+        hierarchies = self._hierarchies(dimension)
+        return hierarchies is not None and _normalise(hierarchy) in hierarchies
+
+    def lookup_in_hierarchy(self, dimension: str, hierarchy: str, element: str) -> str | None:
+        """Return the principal name of an element in one named hierarchy, or None."""
+        if _normalise(hierarchy) == _normalise(dimension):
+            return self.lookup(dimension, element)
+        hierarchies = self._hierarchies(dimension)
+        if hierarchies is None:
+            return None
+        entry = hierarchies.get(_normalise(hierarchy))
+        return None if entry is None else entry[1].get(_normalise(element))
+
+    @property
+    def failed_hierarchies(self) -> dict[str, str]:
+        """Dimensions whose alternate hierarchies could not be read, with the error."""
+        return dict(self._hier_failed)
 
     def names_and_aliases(self, dimension: str) -> dict[str, str] | None:
         """Return ``{normalised name or alias: principal name}``, or None if unreadable."""
@@ -319,6 +434,11 @@ class ElementIndex:
 def tm1_element_loader(client: TM1Client) -> TM1ElementLoader:
     """Return a loader that reads element names and alias values via TM1py."""
     return TM1ElementLoader(client.service)
+
+
+def tm1_hierarchy_loader(client: TM1Client) -> TM1HierarchyLoader:
+    """Return a loader that reads the element names of alternate hierarchies via TM1."""
+    return TM1HierarchyLoader(client.service)
 
 
 def tm1_element_resolver(client: TM1Client) -> TM1MdxResolver:

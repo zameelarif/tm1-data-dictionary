@@ -136,6 +136,12 @@ DIM_PROCESS_ELEMENT_ROLE = "}Meta_ProcessElementRole"
 DIM_PROCESS_ELEMENT_MEASURE = "}Meta_ProcessElementMeasure"
 CUBE_PROCESS_ELEMENT = "}Meta_Process_Element"
 
+# --- }Meta_Process_Output (Phase 3b - TI exports) ---
+DIM_OUTPUT_TYPE = "}Meta_OutputType"
+DIM_OUTPUT = "}Meta_Output"
+DIM_OUTPUT_MEASURE = "}Meta_OutputMeasure"
+CUBE_PROCESS_OUTPUT = "}Meta_Process_Output"
+
 # --- }Meta_Rule_Function (Phase 2d - rules) ---
 DIM_RULE_FUNCTION_MEASURE = "}Meta_RuleFunctionMeasure"
 CUBE_RULE_FUNCTION = "}Meta_Rule_Function"
@@ -333,6 +339,26 @@ PROCESS_ELEMENT_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Expression", STRING),  # the argument as written
     ElementDef("ElementExists", STRING),  # Yes | No | Unknown
     ElementDef("Statement", STRING),  # the statement (truncated)
+)
+
+# Where a TI process sends data, in }Meta_Process_Output.
+OUTPUT_TYPE_ELEMENTS: tuple[ElementDef, ...] = (
+    ElementDef("File", STRING),  # ASCIIOutput / TextOutput (and Bedrock data export): a file path
+    ElementDef("ODBC", STRING),  # ODBCOutput: a data source name (DSN)
+    ElementDef("Command", STRING),  # ExecuteCommand: a command line
+)
+
+# Measures for }Meta_Process_Output (one row per process / output type / target).
+PROCESS_OUTPUT_MEASURES: tuple[ElementDef, ...] = (
+    ElementDef("Count", NUMERIC),  # calls rolled into the row
+    ElementDef("Function", STRING),  # TI function of the first call, e.g. ASCIIOutput
+    ElementDef("FirstBlock", STRING),  # Prolog | Metadata | Data | Epilog
+    ElementDef("FirstLine", NUMERIC),  # line of the first call
+    ElementDef("Lines", STRING),  # every call line, comma-separated
+    ElementDef("Resolved", STRING),  # Literal | Resolved | Partly | Runtime
+    ElementDef("Expression", STRING),  # the target as written in the code
+    ElementDef("Detail", STRING),  # fields written, SQL statement, wait flag, why unresolved
+    ElementDef("ReadsFrom", STRING),  # cubes the process reads (its source, to know what leaves)
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric
@@ -686,6 +712,31 @@ def process_element_schema() -> SchemaDef:
     )
     return SchemaDef(
         dimensions=(process_dim, cube_dim, dimension_dim, element_dim, role_dim, measure_dim),
+        cubes=(cube,),
+    )
+
+
+def process_output_schema() -> SchemaDef:
+    """Return the schema for }Meta_Process_Output and its dimensions (Phase 3b).
+
+    Dimensioned }Meta_Process x }Meta_OutputType x }Meta_Output x }Meta_OutputMeasure.
+
+    Records every file, database and command a TI process sends data to: the *name* of the
+    export file (or DSN, or command), the process that writes it, and the details - function,
+    line, fields or SQL, and the cubes the process reads. }Meta_Output holds the targets,
+    which the writer adds at run time; }Meta_OutputType is seeded with File, ODBC and Command
+    so the cube can be sliced by kind of output.
+    """
+    process_dim = DimensionDef(DIM_PROCESS, (SEED_ELEMENT,))
+    type_dim = DimensionDef(DIM_OUTPUT_TYPE, OUTPUT_TYPE_ELEMENTS)
+    output_dim = DimensionDef(DIM_OUTPUT, (SEED_ELEMENT,))
+    measure_dim = DimensionDef(DIM_OUTPUT_MEASURE, PROCESS_OUTPUT_MEASURES)
+    cube = CubeDef(
+        CUBE_PROCESS_OUTPUT,
+        (DIM_PROCESS, DIM_OUTPUT_TYPE, DIM_OUTPUT, DIM_OUTPUT_MEASURE),
+    )
+    return SchemaDef(
+        dimensions=(process_dim, type_dim, output_dim, measure_dim),
         cubes=(cube,),
     )
 

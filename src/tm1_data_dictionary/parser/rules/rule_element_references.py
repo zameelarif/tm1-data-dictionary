@@ -29,6 +29,11 @@ The second part is a *continuation* (see :mod:`rule_text`): its own expression, 
 comparison references are recorded, but its inherited area is not, so area elements are
 counted once per rule, not once per part.
 
+An element that is **not in the dimension's default hierarchy but is in an alternate one** is
+not reported as missing: it is recorded with ElementExists = ``InAlternateHierarchy`` and the
+hierarchy named in ``Candidates``. That separates "deleted" from "lives only in an alternate
+hierarchy", which a rule cannot reach by name.
+
 Only plain string literals are recorded. Arguments that are expressions (``!Version``,
 ``ATTRS(...)``, nested ``DB(...)``) are skipped - the same "never guess" principle as
 unresolved TI references and dynamic ``DB()`` cube names.
@@ -72,6 +77,7 @@ AMBIGUOUS_DIMENSION = "(Ambiguous)"
 EXISTS_YES = "Yes"
 EXISTS_NO = "No"
 EXISTS_UNKNOWN = "Unknown"  # the cube or dimension could not be checked
+EXISTS_ALTERNATE = "InAlternateHierarchy"  # not in the default hierarchy, but in another one
 
 
 class ReferenceType(str, Enum):
@@ -344,8 +350,8 @@ class ElementReferenceRow:
     count: int
     first_line: int
     first_statement: str
-    element_exists: str  # Yes | No | Unknown
-    candidates: str  # candidate dimensions when ambiguous, comma-separated
+    element_exists: str  # Yes | No | Unknown | InAlternateHierarchy
+    candidates: str  # candidate dimensions when ambiguous, or the hierarchy it was found in
     written_as: str  # how the first reference wrote the element
     target_cubes: list[str] = field(default_factory=list)
 
@@ -368,10 +374,28 @@ class ElementReferenceRollup:
     def unknown_count(self) -> int:
         return sum(1 for r in self.rows if r.element_exists == EXISTS_UNKNOWN)
 
+    @property
+    def alternate_count(self) -> int:
+        return sum(1 for r in self.rows if r.element_exists == EXISTS_ALTERNATE)
+
 
 def _normalise(name: str) -> str:
     """TM1 object and element names are case- and space-insensitive."""
     return name.replace(" ", "").lower()
+
+
+def _other_hierarchy(index: ElementLookup, dimension: str, element: str) -> tuple[str, str] | None:
+    """Return ``(principal, hierarchy)`` if the element is in an alternate hierarchy.
+
+    Indexes that cannot read alternate hierarchies (no such method) answer None, so a lookup
+    that fails stays "missing" exactly as before.
+    """
+    finder = getattr(index, "find_in_other_hierarchies", None)
+    return finder(dimension, element) if callable(finder) else None
+
+
+def _alternate_note(hierarchy: str) -> str:
+    return f"found only in hierarchy '{hierarchy}'"
 
 
 def _check(index: ElementLookup, dimension: str, element: str) -> tuple[str, str, str, str]:
@@ -380,6 +404,9 @@ def _check(index: ElementLookup, dimension: str, element: str) -> tuple[str, str
         return dimension, element, EXISTS_UNKNOWN, ""
     principal = index.lookup(dimension, element)
     if principal is None:
+        other = _other_hierarchy(index, dimension, element)
+        if other is not None:
+            return dimension, other[0], EXISTS_ALTERNATE, _alternate_note(other[1])
         return dimension, element, EXISTS_NO, ""
     return dimension, principal, EXISTS_YES, ""
 
@@ -422,6 +449,17 @@ def resolve_reference(
     if len(matches) > 1:
         candidates = ", ".join(d for d, _ in matches)
         return AMBIGUOUS_DIMENSION, ref.element, EXISTS_YES, candidates
+    alternates = [
+        (dimension, *other)
+        for dimension in dims
+        if (other := _other_hierarchy(index, dimension, ref.element)) is not None
+    ]
+    if len(alternates) == 1:
+        dimension, principal, hierarchy = alternates[0]
+        return dimension, principal, EXISTS_ALTERNATE, _alternate_note(hierarchy)
+    if len(alternates) > 1:
+        candidates = ", ".join(f"{d}:{h}" for d, _, h in alternates)
+        return AMBIGUOUS_DIMENSION, ref.element, EXISTS_ALTERNATE, candidates
     if any(not index.available(d) for d in dims):
         return UNKNOWN_DIMENSION, ref.element, EXISTS_UNKNOWN, ""
     return UNKNOWN_DIMENSION, ref.element, EXISTS_NO, ""

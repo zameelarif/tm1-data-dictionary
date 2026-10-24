@@ -11,6 +11,15 @@ For every included process:
 Then check every recorded element against its dimension (aliases included, using the
 same lookup as the rules pass), clear ``}Meta_Process_Element`` and write the rows.
 
+ElementExists has five values:
+
+- ``Yes`` - the element is in the dimension (or in the hierarchy the call names);
+- ``No`` - it is not, and nothing in the process creates it;
+- ``CreatedByProcess`` - not there yet, but the same process inserts it
+  (``DimensionElementInsert``, ``HierarchyElementInsert`` ...), so it is not a broken reference;
+- ``InAlternateHierarchy`` - not in the default hierarchy, but in an alternate one;
+- ``Unknown`` - the dimension, hierarchy or name could not be checked.
+
 Deliberately a separate command from ``tm1dd extract``, in the same way rules are, so
 element lineage can fail or be skipped without affecting the proven TI lineage cubes.
 
@@ -29,6 +38,7 @@ from tm1_data_dictionary.element_index import (
     ElementIndex,
     tm1_element_loader,
     tm1_element_resolver,
+    tm1_hierarchy_loader,
 )
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.parser.blocks import code_lines
@@ -38,6 +48,7 @@ from tm1_data_dictionary.parser.element_scan import (
     ELEMENT_ALL,
     ELEMENT_MDX,
     ELEMENT_RUNTIME,
+    HIERARCHY_UNRESOLVED,
     NO_CUBE,
     UNKNOWN,
     ElementScanner,
@@ -48,6 +59,7 @@ from tm1_data_dictionary.parser.element_watchlist import (
     load_element_watchlist,
     scan_watchlist,
 )
+from tm1_data_dictionary.parser.rules.rule_element_references import EXISTS_ALTERNATE
 from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.parser.ti_signatures import load_signatures
 from tm1_data_dictionary.parser.var_trace import normalise
@@ -62,6 +74,11 @@ ProgressFn = Callable[[int, int, str, str], None]
 
 SPECIAL_ELEMENTS = frozenset({ELEMENT_RUNTIME, ELEMENT_MDX, ELEMENT_ALL})
 KIND_WATCHLIST = "Watchlist"
+EXISTS_YES = "Yes"
+EXISTS_NO = "No"
+EXISTS_UNKNOWN = "Unknown"
+EXISTS_CREATED = "CreatedByProcess"
+ROLE_DIM_MAINTAIN = "DimMaintain"
 
 
 @dataclass
@@ -79,6 +96,8 @@ class ElementSummary:
     resolved: int = 0
     runtime: int = 0
     missing_elements: int = 0  # rows whose element does not exist
+    created_by_process: int = 0  # rows whose element the same process inserts itself
+    alternate_hierarchy: int = 0  # rows whose element is only in an alternate hierarchy
     unchecked_elements: int = 0  # rows whose dimension could not be read
     watched_elements: int = 0
     watch_hits: int = 0  # rows added by the watch list
@@ -102,6 +121,8 @@ class ElementSummary:
                 f"({self.literal} literal, {self.resolved} resolved, {self.runtime} runtime)"
             ),
             f"Element rows - missing element: {self.missing_elements}",
+            f"Element rows - element created by the process itself: {self.created_by_process}",
+            f"Element rows - only in an alternate hierarchy: {self.alternate_hierarchy}",
             f"Element rows - not checked: {self.unchecked_elements}",
         ]
         if self.watched_elements:
@@ -160,12 +181,42 @@ def _watch_lookup(
     return lookup
 
 
-def _exists(index: ElementIndex, dimension: str, element: str) -> str:
+def _exists(
+    index: ElementIndex, dimension: str, element: str, hierarchy: str = ""
+) -> tuple[str, str]:
+    """Return ``(ElementExists, note)`` for one element.
+
+    With a hierarchy named in the call, that hierarchy is checked (as TM1 would). Otherwise
+    the default hierarchy is checked first, and only a miss looks in the alternate ones.
+    """
     if element in SPECIAL_ELEMENTS or dimension == UNKNOWN:
-        return "Unknown"
+        return EXISTS_UNKNOWN, ""
     if not index.available(dimension):
-        return "Unknown"
-    return "Yes" if index.lookup(dimension, element) is not None else "No"
+        return EXISTS_UNKNOWN, ""
+    if hierarchy == HIERARCHY_UNRESOLVED:
+        return EXISTS_UNKNOWN, ""
+    if hierarchy and normalise(hierarchy) != normalise(dimension):
+        if not index.hierarchy_available(dimension, hierarchy):
+            return EXISTS_UNKNOWN, ""
+        found = index.lookup_in_hierarchy(dimension, hierarchy, element)
+        return (EXISTS_YES if found is not None else EXISTS_NO), ""
+    if index.lookup(dimension, element) is not None:
+        return EXISTS_YES, ""
+    other = index.find_in_other_hierarchies(dimension, element)
+    if other is not None:
+        return EXISTS_ALTERNATE, f"found only in hierarchy '{other[1]}'"
+    return EXISTS_NO, ""
+
+
+def _created_by_process(rows: list[ElementRow]) -> set[tuple[str, str, str]]:
+    """Return ``(process, dimension, element)`` for every element a process inserts itself."""
+    return {
+        (row.process, normalise(row.dimension), normalise(row.element))
+        for row in rows
+        if row.role == ROLE_DIM_MAINTAIN
+        and "elementinsert" in row.function.lower()
+        and row.element not in SPECIAL_ELEMENTS
+    }
 
 
 def _watch_row(hit: WatchHit) -> ElementRow:
@@ -200,7 +251,11 @@ def extract_all_elements(
     signatures = load_signatures(signatures_file)
     watchlist = load_element_watchlist(watchlist_file)
     summary = ElementSummary(dry_run=client.dry_run, watched_elements=watchlist.element_count)
-    index = index or ElementIndex(tm1_element_loader(client), tm1_element_resolver(client))
+    index = index or ElementIndex(
+        tm1_element_loader(client),
+        tm1_element_resolver(client),
+        hierarchy_loader=tm1_hierarchy_loader(client),
+    )
     cube_dims = CubeDimensionCache(client.service)
     lookup = _watch_lookup(watchlist, index, summary) if watchlist else {}
 
@@ -240,6 +295,7 @@ def extract_all_elements(
                         confidence=hit.confidence,
                         expression=hit.expression,
                         statement=hit.statement,
+                        hierarchy=hit.hierarchy,
                     )
                 )
             watch_rows: list[ElementRow] = []
@@ -268,10 +324,19 @@ def extract_all_elements(
             if (normalise(dimension), normalise(target)) not in watch_seen:
                 summary.watch_not_found.append(f"{dimension} / {element}")
 
+    created = _created_by_process(rows)
     checked: list[ElementRow] = []
     for row in rows:
-        exists = _exists(index, row.dimension, row.element)
-        checked.append(ElementRow(**{**row.__dict__, "element_exists": exists}))  # frozen: rebuild
+        exists, note = _exists(index, row.dimension, row.element, row.hierarchy)
+        if (
+            exists == EXISTS_NO
+            and (row.process, normalise(row.dimension), normalise(row.element)) in created
+        ):
+            exists = EXISTS_CREATED
+        expression = f"{row.expression} [{note}]" if note else row.expression
+        checked.append(
+            ElementRow(**{**row.__dict__, "element_exists": exists, "expression": expression})
+        )  # frozen: rebuild
     rows = checked
     summary.element_references = sum(1 for r in rows if r.kind != KIND_WATCHLIST)
     for row in rows:
@@ -288,10 +353,14 @@ def extract_all_elements(
         clear_process_element(client)
     summary.rows_written = write_element_lineage(client, rows)
     # Count after aggregation, matching what lands in the cube.
-    keys_missing = {r.key for r in rows if r.element_exists == "No"}
+    keys_missing = {r.key for r in rows if r.element_exists == EXISTS_NO}
     keys_unchecked = {
-        r.key for r in rows if r.element_exists == "Unknown" and r.element not in SPECIAL_ELEMENTS
+        r.key
+        for r in rows
+        if r.element_exists == EXISTS_UNKNOWN and r.element not in SPECIAL_ELEMENTS
     }
+    summary.created_by_process = len({r.key for r in rows if r.element_exists == EXISTS_CREATED})
+    summary.alternate_hierarchy = len({r.key for r in rows if r.element_exists == EXISTS_ALTERNATE})
     summary.missing_elements = len(keys_missing)
     summary.unchecked_elements = len(keys_unchecked)
     return summary

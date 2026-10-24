@@ -19,6 +19,20 @@ An element that cannot be resolved without running the process is recorded as
 ``(Runtime)``, an MDX subset as ``(MDX)``, with the expression kept so a person can follow
 it. Nothing is dropped silently.
 
+Views described by a **Bedrock filter string** are followed too (see :mod:`bedrock`)::
+
+    ExecuteProcess('Bedrock.Cube.View.Create', 'pCube', c, 'pView', v, 'pFilter', f);
+    ViewZeroOut(c, v);                         -> Clear  Version:Actual, Budget ...
+    ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', c, 'pFilter', f);   -> Clear
+
+Parts of the filter that are only known at run time (a parameter, a source variable) are
+recorded as ``(Runtime)`` with the expression; a filter that cannot be read at all marks every
+dimension ``(Runtime)``, never ``(All)``. A filter that names a dimension the cube does not
+have is treated the same way, so a wrong delimiter assumption cannot produce wrong elements.
+
+Functions that name a hierarchy (``HierarchyElementInsert`` ...) record it on the hit, so the
+element can be checked against that hierarchy and not just the default one.
+
 Pure analysis: the caller supplies a ``cube_dimensions`` lookup (TM1 in production, a
 dict in tests). No TM1, no I/O.
 """
@@ -29,16 +43,30 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from tm1_data_dictionary.parser.bedrock import (
+    BEDROCK_DATA_CLEAR,
+    BEDROCK_VIEW_CREATE,
+    DEFAULT_DIM_DELIM,
+    DEFAULT_ELE_DELIM,
+    DEFAULT_ELE_START_DELIM,
+    FUNCTION_DATA_CLEAR,
+    FUNCTION_VIEW_CREATE,
+    looks_like_mdx,
+    parse_filter,
+    process_arguments,
+)
 from tm1_data_dictionary.parser.blocks import CodeLine
 from tm1_data_dictionary.parser.references import _extract_arg_string, _split_top_level_args
 from tm1_data_dictionary.parser.ti_signatures import ROLE_SUBSET, Signature
 from tm1_data_dictionary.parser.var_trace import (
     REASON_MAPPED,
     REASON_PARAMETER,
+    REASON_RUNTIME,
     REASON_SOURCE,
     Env,
     Resolved,
     Tracer,
+    _split_top_level,
     normalise,
     walk,
 )
@@ -53,6 +81,8 @@ ELEMENT_MDX = "(MDX)"
 ELEMENT_ALL = "(All)"
 UNKNOWN = "(Unknown)"
 NO_CUBE = "(No cube)"
+HIERARCHY_UNRESOLVED = "(Runtime)"  # a hierarchy argument that is only known at run time
+_MARK = "\x00"  # wraps the index of an unresolved piece inside a partly-known string
 
 # Confidence levels.
 CONF_LITERAL = "Literal"
@@ -94,11 +124,13 @@ class ElementHit:
     confidence: str
     expression: str
     statement: str
+    hierarchy: str = ""  # hierarchy named in the call, "" for the default hierarchy
 
 
 @dataclass
 class _SubsetState:
     dimension: str
+    hierarchy: str = ""
     members: list[tuple[str, str, str, str]] = field(default_factory=list)
     # (element, kind, confidence, expression); element may be (Runtime) / (MDX)
     used: bool = False
@@ -109,6 +141,12 @@ class _SubsetState:
 class _ViewState:
     cube: str
     assigns: dict[str, tuple[str, str]] = field(default_factory=dict)  # dim key -> (dim, sub)
+    # A Bedrock view: the slice comes from a filter string, not from subsets built in code.
+    filtered: bool = False
+    filters: dict[str, tuple[str, str, list[tuple[str, str, str, str]]]] = field(
+        default_factory=dict
+    )  # dim key -> (dim, hierarchy, members as (element, kind, confidence, expression))
+    filter_runtime: str = ""  # the filter expression when it could not be read
 
 
 def _kind_for(resolved: Resolved) -> tuple[str, str]:
@@ -120,6 +158,47 @@ def _kind_for(resolved: Resolved) -> tuple[str, str]:
     if resolved.literal:
         return KIND_LITERAL, CONF_LITERAL
     return KIND_VARIABLE, CONF_RESOLVED
+
+
+def _filter_dimension(token: str, canonical: dict[str, str]) -> tuple[str | None, str]:
+    """Match a filter's dimension token to a cube dimension; return (dimension, hierarchy).
+
+    ``Dim:Hier`` names a hierarchy. With the cube's dimensions known, a token that matches
+    none of them returns ``(None, "")``; with them unknown the token is taken as written.
+    """
+    key = normalise(token)
+    if key in canonical:
+        return canonical[key], ""
+    if ":" in token:
+        name, _, hierarchy = token.partition(":")
+        if normalise(name) in canonical:
+            return canonical[normalise(name)], hierarchy.strip()
+        if not canonical:
+            return name.strip(), hierarchy.strip()
+        return None, ""
+    return (token, "") if not canonical else (None, "")
+
+
+def _filter_member(
+    token: str, unknown: dict[str, tuple[str, str]], literal: bool, raw: str
+) -> tuple[str, str, str, str]:
+    """Return ``(element, kind, confidence, expression)`` for one element token of a filter."""
+    if _MARK in token:
+        pieces = [unknown[m] for m in unknown if m in token]
+        expression = "; ".join(text for text, _ in pieces)
+        reason = pieces[0][1] if pieces else REASON_RUNTIME
+        known = (REASON_SOURCE, REASON_PARAMETER, REASON_MAPPED)
+        return (
+            ELEMENT_RUNTIME,
+            (reason if reason in known else CONF_RUNTIME),
+            CONF_RUNTIME,
+            expression,
+        )
+    if looks_like_mdx(token):
+        return ELEMENT_MDX, KIND_MDX, CONF_RUNTIME, token
+    if literal:
+        return token, KIND_LITERAL, CONF_LITERAL, raw
+    return token, KIND_VARIABLE, CONF_RESOLVED, raw
 
 
 class ElementScanner:
@@ -178,6 +257,7 @@ class ElementScanner:
         kind: str,
         confidence: str,
         expression: str,
+        hierarchy: str = "",
     ) -> None:
         block, line_no, statement = where
         self.hits.append(
@@ -194,6 +274,7 @@ class ElementScanner:
                 confidence=confidence,
                 expression=_truncate(expression),
                 statement=_truncate(statement),
+                hierarchy=hierarchy,
             )
         )
 
@@ -205,6 +286,7 @@ class ElementScanner:
         role: str,
         where: tuple[str, int, str],
         function: str,
+        hierarchy: str = "",
     ) -> None:
         """Record one element argument (each possible value, or a (Runtime) marker)."""
         if expr.strip().startswith("(") and "," in expr:
@@ -224,11 +306,14 @@ class ElementScanner:
                 kind,
                 confidence,
                 self.env.describe(expr),
+                hierarchy,
             )
             return
         for value in sorted(resolved.values):
             if value:
-                self._add(cube, dimension, value, role, where, function, kind, confidence, expr)
+                self._add(
+                    cube, dimension, value, role, where, function, kind, confidence, expr, hierarchy
+                )
 
     # ------------------------------------------------------------------ calls
     def _cell_call(self, sig: Signature, args: list[str], where: tuple[str, int, str]) -> None:
@@ -249,11 +334,16 @@ class ElementScanner:
             return
         dim_values = self.env.evaluate(args[sig.dim]).values
         dims = sorted(dim_values) if dim_values else [UNKNOWN]
+        hierarchy = ""
+        if sig.hierarchy is not None and sig.hierarchy < len(args):
+            hierarchy = self._hierarchy(args[sig.hierarchy])
         if sig.role == ROLE_SUBSET and sig.subset is not None and sig.subset < len(args):
             for dim in dims:
                 if dim == UNKNOWN:
                     continue
                 state = self._subset(dim, args[sig.subset], where)
+                if hierarchy:
+                    state.hierarchy = hierarchy
                 for index in sig.elements:
                     if index < len(args):
                         self._subset_member(state, args[index])
@@ -261,7 +351,14 @@ class ElementScanner:
         for dim in dims:
             for index in sig.elements:
                 if index < len(args):
-                    self._add_argument(NO_CUBE, dim, args[index], sig.role, where, sig.name)
+                    self._add_argument(
+                        NO_CUBE, dim, args[index], sig.role, where, sig.name, hierarchy
+                    )
+
+    def _hierarchy(self, expr: str) -> str:
+        """Return the hierarchy a call names, or HIERARCHY_UNRESOLVED if not one known value."""
+        value = self._single(expr)
+        return value if value is not None else HIERARCHY_UNRESOLVED
 
     # ------------------------------------------------------------------ subsets/views
     def _subset(self, dim: str, subset_expr: str, where: tuple[str, int, str]) -> _SubsetState:
@@ -282,11 +379,19 @@ class ElementScanner:
             if value:
                 state.members.append((value, kind, confidence, expr))
 
-    def _subset_reset(self, dim_expr: str, subset_expr: str, where: tuple[str, int, str]) -> None:
+    def _subset_reset(
+        self,
+        dim_expr: str,
+        subset_expr: str,
+        where: tuple[str, int, str],
+        hierarchy_expr: str | None = None,
+    ) -> None:
         dim = self._single(dim_expr)
         if dim is not None:
             state = self._subset(dim, subset_expr, where)
             state.members.clear()
+            if hierarchy_expr is not None:
+                state.hierarchy = self._hierarchy(hierarchy_expr)
 
     def _subset_mdx(self, subset_expr: str, mdx_expr: str, dim_expr: str | None, where) -> None:
         mdx = self._single(mdx_expr) or mdx_expr
@@ -312,7 +417,10 @@ class ElementScanner:
         return state
 
     def _emit_view(self, view: _ViewState, role: str, where: tuple[str, int, str], fn: str) -> None:
-        dims = self.cube_dimensions(view.cube)
+        dims = self.cube_dimensions(view.cube) if view.cube != UNKNOWN else None
+        if view.filtered:
+            self._emit_filtered(view, dims, role, where, fn)
+            return
         names = list(dims) if dims else [d for d, _ in view.assigns.values()]
         for dim in names:
             assigned = view.assigns.get(normalise(dim))
@@ -347,16 +455,64 @@ class ElementScanner:
                     "subset is empty when the view is used",
                 )
             for element, kind, confidence, expr in subset.members:
-                self._add(view.cube, dim, element, role, where, fn, kind, confidence, expr)
+                self._add(
+                    view.cube,
+                    dim,
+                    element,
+                    role,
+                    where,
+                    fn,
+                    kind,
+                    confidence,
+                    expr,
+                    subset.hierarchy,
+                )
+
+    def _emit_filtered(
+        self,
+        view: _ViewState,
+        dims: tuple[str, ...] | None,
+        role: str,
+        where: tuple[str, int, str],
+        fn: str,
+    ) -> None:
+        """Emit a Bedrock view: the filter's elements, (All) for the rest, or (Runtime)."""
+        names = list(dims) if dims else [d for d, _, _ in view.filters.values()]
+        if view.filter_runtime:
+            for dim in names:
+                self._add(
+                    view.cube,
+                    dim,
+                    ELEMENT_RUNTIME,
+                    role,
+                    where,
+                    fn,
+                    CONF_RUNTIME,
+                    CONF_RUNTIME,
+                    view.filter_runtime,
+                )
+            return
+        for dim in names:
+            entry = view.filters.get(normalise(dim))
+            if entry is None:
+                self._add(view.cube, dim, ELEMENT_ALL, role, where, fn, KIND_ALL, CONF_RESOLVED, "")
+                continue
+            _name, hierarchy, members = entry
+            for element, kind, confidence, expr in members:
+                self._add(
+                    view.cube, dim, element, role, where, fn, kind, confidence, expr, hierarchy
+                )
 
     def _view_call(self, name: str, args: list[str], where: tuple[str, int, str]) -> bool:
         """Handle subset/view functions. Return True if ``name`` was one of them."""
         lower = name.lower()
+        if lower in ("executeprocess", "runprocess"):
+            return self._bedrock_call(args, where)
         if lower in ("subsetcreate", "subsetdeleteallelements") and len(args) >= 2:
             self._subset_reset(args[0], args[1], where)
         elif lower in ("hierarchysubsetcreate", "hierarchysubsetdeleteallelements"):
             if len(args) >= 3:
-                self._subset_reset(args[0], args[2], where)
+                self._subset_reset(args[0], args[2], where, args[1])
         elif lower == "subsetcreatebymdx" and len(args) >= 2:
             self._subset_mdx(args[0], args[1], args[2] if len(args) >= 3 else None, where)
         elif lower == "subsetmdxset" and len(args) >= 3:
@@ -377,6 +533,115 @@ class ElementScanner:
         else:
             return False
         return True
+
+    # ------------------------------------------------------------------ Bedrock
+    def _bedrock_call(self, args: list[str], where: tuple[str, int, str]) -> bool:
+        """Handle ExecuteProcess/RunProcess of a Bedrock view or clear. True if it was one."""
+        if not args:
+            return False
+        name = self._single(args[0])
+        if name is None:
+            return False
+        process = normalise(name)
+        if process in BEDROCK_VIEW_CREATE:
+            function = FUNCTION_VIEW_CREATE
+        elif process in BEDROCK_DATA_CLEAR:
+            function = FUNCTION_DATA_CLEAR
+        else:
+            return False
+        params = process_arguments(args[1:])
+        cube_expr = params.get("pcube")
+        if function == FUNCTION_VIEW_CREATE:
+            view_expr = params.get("pview")
+            view = None
+            if cube_expr is not None and view_expr is not None:
+                view = self._view(cube_expr, view_expr)
+            if view is None:
+                return True  # cube or view name only known at run time: nothing to follow
+            view.assigns.clear()
+        else:
+            cube = self._single(cube_expr) if cube_expr is not None else None
+            view = _ViewState(cube=cube or UNKNOWN)
+        self._apply_bedrock_filter(view, params)
+        if function == FUNCTION_DATA_CLEAR:
+            self._emit_view(view, ROLE_CLEAR, where, function)
+        return True
+
+    def _partial_text(self, expr: str) -> tuple[str, dict[str, tuple[str, str]]]:
+        """Evaluate a ``|`` concatenation piece by piece.
+
+        Pieces with one known value are inserted; any other piece becomes a marker, and
+        ``{marker: (expression, reason)}`` says what it was. This keeps the known parts of a
+        filter such as ``'Version' | d | 'Actual&Year' | d | pYear`` usable.
+        """
+        pieces: list[str] = []
+        unknown: dict[str, tuple[str, str]] = {}
+        for part in _split_top_level(expr, "|"):
+            resolved = self.env.evaluate(part)
+            if resolved.values is not None and len(resolved.values) == 1:
+                pieces.append(next(iter(resolved.values)))
+                continue
+            marker = f"{_MARK}{len(unknown)}{_MARK}"
+            unknown[marker] = (self.env.describe(part), resolved.reason or REASON_RUNTIME)
+            pieces.append(marker)
+        return "".join(pieces), unknown
+
+    def _apply_bedrock_filter(self, view: _ViewState, params: dict[str, str]) -> None:
+        """Read the pFilter argument into ``view.filters`` (or ``view.filter_runtime``)."""
+        view.filtered = True
+        view.filters = {}
+        view.filter_runtime = ""
+        filter_expr = params.get("pfilter")
+        if filter_expr is None or not filter_expr.strip():
+            return  # no filter: the whole cube, so every dimension is (All)
+        delimiters: list[str] = []
+        for key, default in (
+            ("pdimdelim", DEFAULT_DIM_DELIM),
+            ("pelestartdelim", DEFAULT_ELE_START_DELIM),
+            ("peledelim", DEFAULT_ELE_DELIM),
+        ):
+            expr = params.get(key)
+            if expr is None:
+                delimiters.append(default)
+                continue
+            value = self._single(expr)
+            if not value:
+                view.filter_runtime = f"{key} is not a known value: {self.env.describe(expr)}"
+                return
+            delimiters.append(value)
+        text, unknown = self._partial_text(filter_expr)
+        expression = self.env.describe(filter_expr)
+        remainder = text
+        for marker in unknown:
+            remainder = remainder.replace(marker, "")
+        if unknown and not remainder.strip():
+            view.filter_runtime = f"the filter is only known at run time: {expression}"
+            return
+        parts = parse_filter(text, delimiters[0], delimiters[1], delimiters[2])
+        if parts is None:
+            view.filter_runtime = f"filter not understood: {expression}"
+            return
+        dims = self.cube_dimensions(view.cube) if view.cube != UNKNOWN else None
+        canonical = {normalise(d): d for d in dims} if dims else {}
+        literal = self.env.evaluate(filter_expr).literal and not unknown
+        for part in parts:
+            if _MARK in part.dimension:
+                view.filters = {}
+                view.filter_runtime = f"a dimension in the filter is not known: {expression}"
+                return
+            dim, hierarchy = _filter_dimension(part.dimension, canonical)
+            if dim is None:
+                view.filters = {}
+                view.filter_runtime = (
+                    f"filter names {part.dimension!r}, which the cube does not have: {expression}"
+                )
+                return
+            members = [_filter_member(e, unknown, literal, part.raw) for e in part.elements]
+            key = normalise(dim)
+            if key in view.filters:
+                view.filters[key][2].extend(members)
+            else:
+                view.filters[key] = (dim, hierarchy, members)
 
     # ------------------------------------------------------------------ main
     def _scan_calls(self, text: str, where: tuple[str, int, str]) -> None:
@@ -432,4 +697,5 @@ class ElementScanner:
                     kind,
                     confidence,
                     expr,
+                    state.hierarchy,
                 )

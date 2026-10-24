@@ -16,6 +16,9 @@ optional ``ti_functions.txt`` beside ``config.yaml``::
     # name = Role, dim=N, element=N[, element=N] (dimension/attribute functions)
     # Positions are 1-based, as in the IBM documentation.
     MyCompany.CellPut = Write, cube=2, elements=3+
+    # Functions that name a hierarchy also take hierarchy=N, so the element is checked
+    # against that hierarchy and not just the default one:
+    MyCompany.HierInsert = DimMaintain, dim=1, hierarchy=2, element=4
 
 Roles used: ``Write``, ``Read``, ``AttrWrite``, ``AttrRead``, ``DimMaintain`` and
 ``Subset``. Views and subsets used for zero-outs and source views are followed separately
@@ -55,6 +58,7 @@ class Signature:
     dim: int | None = None  # dimension functions: which argument is the dimension
     elements: tuple[int, ...] = ()  # dimension functions: which arguments are elements
     subset: int | None = None  # SubsetElementInsert-style: which argument is the subset
+    hierarchy: int | None = None  # Hierarchy* functions: which argument names the hierarchy
 
     @property
     def is_cell_function(self) -> bool:
@@ -65,13 +69,21 @@ def _cell(name: str, role: str, cube: int, first: int) -> Signature:
     return Signature(name=name, role=role, cube=cube - 1, elements_from=first - 1)
 
 
-def _dim(name: str, role: str, dim: int, *elements: int, subset: int | None = None) -> Signature:
+def _dim(
+    name: str,
+    role: str,
+    dim: int,
+    *elements: int,
+    subset: int | None = None,
+    hierarchy: int | None = None,
+) -> Signature:
     return Signature(
         name=name,
         role=role,
         dim=dim - 1,
         elements=tuple(e - 1 for e in elements),
         subset=None if subset is None else subset - 1,
+        hierarchy=None if hierarchy is None else hierarchy - 1,
     )
 
 
@@ -100,13 +112,13 @@ BUILTIN_SIGNATURES: tuple[Signature, ...] = (
     _dim("DimensionElementComponentAdd", ROLE_DIM_MAINTAIN, 1, 2, 3),
     _dim("DimensionElementComponentAddDirect", ROLE_DIM_MAINTAIN, 1, 2, 3),
     _dim("DimensionElementComponentDelete", ROLE_DIM_MAINTAIN, 1, 2, 3),
-    _dim("HierarchyElementInsert", ROLE_DIM_MAINTAIN, 1, 4),
-    _dim("HierarchyElementDelete", ROLE_DIM_MAINTAIN, 1, 3),
-    _dim("HierarchyElementComponentAdd", ROLE_DIM_MAINTAIN, 1, 3, 4),
-    _dim("HierarchyElementComponentDelete", ROLE_DIM_MAINTAIN, 1, 3, 4),
+    _dim("HierarchyElementInsert", ROLE_DIM_MAINTAIN, 1, 4, hierarchy=2),
+    _dim("HierarchyElementDelete", ROLE_DIM_MAINTAIN, 1, 3, hierarchy=2),
+    _dim("HierarchyElementComponentAdd", ROLE_DIM_MAINTAIN, 1, 3, 4, hierarchy=2),
+    _dim("HierarchyElementComponentDelete", ROLE_DIM_MAINTAIN, 1, 3, 4, hierarchy=2),
     # Subsets (followed into zero-out and source views by element_scan)
     _dim("SubsetElementInsert", ROLE_SUBSET, 1, 3, subset=2),
-    _dim("HierarchySubsetElementInsert", ROLE_SUBSET, 1, 4, subset=3),
+    _dim("HierarchySubsetElementInsert", ROLE_SUBSET, 1, 4, subset=3, hierarchy=2),
 )
 
 
@@ -128,7 +140,7 @@ def parse_signature_line(line: str) -> Signature:
     role = parts[0]
     if role not in KNOWN_ROLES:
         raise SignatureError(f"unknown role '{role}' in: {line.strip()}")
-    cube = elements_from = dim = subset = None
+    cube = elements_from = dim = subset = hierarchy = None
     elements: list[int] = []
     for part in parts[1:]:
         field_match = _FIELD.match(part)
@@ -151,6 +163,8 @@ def parse_signature_line(line: str) -> Signature:
             dim = value - 1
         elif key == "subset":
             subset = value - 1
+        elif key == "hierarchy":
+            hierarchy = value - 1
         else:
             raise SignatureError(f"unknown key '{key}': {line.strip()}")
     sig = Signature(
@@ -161,6 +175,7 @@ def parse_signature_line(line: str) -> Signature:
         dim=dim,
         elements=tuple(elements),
         subset=subset,
+        hierarchy=hierarchy,
     )
     if not sig.is_cell_function and sig.dim is None:
         raise SignatureError(f"needs cube=N and elements=N+, or dim=N: {line.strip()}")

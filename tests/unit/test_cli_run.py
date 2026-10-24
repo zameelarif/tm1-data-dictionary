@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 from tm1_data_dictionary import cli
 
-ALL = ["bootstrap", "ti", "rules", "elements", "views"]
+ALL = ["bootstrap", "ti", "rules", "elements", "outputs", "views"]
 
 
 @pytest.fixture
@@ -46,8 +46,13 @@ def test_only_keeps_fixed_order(calls: list) -> None:
     assert calls == [("dev", "ti"), ("dev", "views")]
 
 
+def test_outputs_step_runs_between_elements_and_views(calls: list) -> None:
+    assert _run("--env", "dev", "--only", "views,outputs,elements").exit_code == 0
+    assert [s for _, s in calls] == ["elements", "outputs", "views"]
+
+
 def test_skip(calls: list) -> None:
-    assert _run("--env", "dev", "--skip", "elements,views").exit_code == 0
+    assert _run("--env", "dev", "--skip", "elements,outputs,views").exit_code == 0
     assert [s for _, s in calls] == ["bootstrap", "ti", "rules"]
 
 
@@ -116,7 +121,7 @@ def test_keep_going_runs_remaining_steps(calls: list, monkeypatch: pytest.Monkey
     monkeypatch.setitem(cli.STEP_RUNNERS, "ti", boom)
     result = _run("--env", "a", "--keep-going")
     assert result.exit_code == 1
-    assert [s for _, s in calls] == ["bootstrap", "rules", "elements", "views"]
+    assert [s for _, s in calls] == ["bootstrap", "rules", "elements", "outputs", "views"]
     assert "RuntimeError: unexpected" in result.output
 
 
@@ -157,5 +162,12 @@ def test_bootstrap_step_stops_when_a_rebuild_is_needed(monkeypatch: pytest.Monke
 
 
 def test_every_step_is_also_its_own_command() -> None:
-    for name in ("bootstrap", "extract", "extract-rules", "extract-elements", "create-views"):
+    for name in (
+        "bootstrap",
+        "extract",
+        "extract-rules",
+        "extract-elements",
+        "extract-outputs",
+        "create-views",
+    ):
         assert name in cli.main.commands

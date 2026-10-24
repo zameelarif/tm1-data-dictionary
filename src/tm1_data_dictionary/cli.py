@@ -40,8 +40,16 @@ from tm1_data_dictionary.env_check import run_checks
 from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.extract import extract_all
 from tm1_data_dictionary.extract_elements import extract_all_elements
+from tm1_data_dictionary.extract_outputs import extract_all_outputs
 from tm1_data_dictionary.extract_rules import extract_all_rules
 from tm1_data_dictionary.graph import build_graph, render_html
+from tm1_data_dictionary.output_where import (
+    filter_rows,
+    read_exports,
+)
+from tm1_data_dictionary.output_where import (
+    write_csv as write_exports_csv,
+)
 from tm1_data_dictionary.parser.assignments import summarize_variables
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.chain_rollup import rollup_chain_lineage
@@ -63,7 +71,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.8"
+SCHEMA_VERSION = "1.9"
 
 
 # --------------------------------------------------------------------------- #
@@ -989,6 +997,139 @@ def extract_elements_cmd(
         click.echo("  Extraction succeeded, but the audit record was not written.")
 
 
+@main.command(name="extract-outputs")
+@_config_option
+@_env_option
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-process progress lines (show only the summary).",
+)
+def extract_outputs_cmd(config_path: str, environment: str | None, quiet: bool) -> None:
+    """Extract what EVERY process exports into }Meta_Process_Output.
+
+    Finds each call to ASCIIOutput, TextOutput, ODBCOutput, ExecuteCommand and the Bedrock
+    data export, works out the target (export file name, data source or command, following
+    variables), and records the process, line, fields or SQL, and the cubes it reads.
+    Targets only partly known (a file name with a parameter in it) are kept, with the
+    unknown part shown in angle brackets.
+
+    Deliberately separate from 'extract'. Records the run into }Meta_Extraction_Audit.
+    Honours dry-run mode. List the result with 'tm1dd exports'.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+
+    def _progress(i: int, total: int, name: str, status: str) -> None:
+        if not quiet:
+            click.echo(f"  [{i:>4}/{total}] {name:<50} {status}")
+
+    start = datetime.now(timezone.utc)
+    run_by = f"{getpass.getuser()} via {cfg.connection.user}"
+    audit_recorded = False
+    try:
+        with TM1Client(cfg) as client:
+            if client.dry_run:
+                click.echo("Dry-run: parsing all processes, nothing will be written.")
+            click.echo("Extracting exports for all processes...")
+            summary = extract_all_outputs(client, progress=_progress)
+            if not client.dry_run:
+                status = "Success" if summary.failed == 0 else "CompletedWithFailures"
+                warnings = f"{summary.failed} process(es) failed" if summary.failed else ""
+                try:
+                    AuditWriter(client).record_run(
+                        extractor_version=__version__,
+                        schema_version=SCHEMA_VERSION,
+                        start_time=start,
+                        exit_status=status,
+                        run_by=run_by,
+                        warnings=warnings,
+                        metrics={
+                            "output_processes_included": summary.included,
+                            "output_processes_failed": summary.failed,
+                            "output_rows": summary.rows_written,
+                            "output_calls": summary.output_calls,
+                            "output_processes": summary.processes_with_outputs,
+                            "output_files": summary.file_exports,
+                            "output_odbc": summary.odbc_exports,
+                            "output_commands": summary.commands,
+                            "output_runtime": summary.runtime,
+                        },
+                    )
+                    audit_recorded = True
+                except Exception as exc:  # noqa: BLE001
+                    click.echo(f"  Audit record not written: {exc}")
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("")
+    click.echo("Export extraction complete.")
+    for line in summary.as_lines():
+        click.echo(f"  {line}")
+    if audit_recorded:
+        click.echo(f"  Run recorded in }}Meta_Extraction_Audit (RunBy: {run_by})")
+    elif not summary.dry_run:
+        click.echo("  Extraction succeeded, but the audit record was not written.")
+
+
+@main.command(name="exports")
+@_config_option
+@_env_option
+@click.option("--contains", default=None, help="Only targets (file, DSN, command) containing this.")
+@click.option("--process", "process_name", default=None, help="Only this process (text match).")
+@click.option(
+    "--type",
+    "output_type",
+    type=click.Choice(["File", "ODBC", "Command"], case_sensitive=False),
+    default=None,
+    help="Only this kind of export.",
+)
+@click.option("--csv", "csv_path", default=None, help="Also write the rows to this CSV file.")
+def exports_cmd(
+    config_path: str,
+    environment: str | None,
+    contains: str | None,
+    process_name: str | None,
+    output_type: str | None,
+    csv_path: str | None,
+) -> None:
+    """List the files, databases and commands TI processes write to (read-only).
+
+    Reads }Meta_Process_Output, so it shows the last 'extract-outputs' run. One row per
+    process and target, with the function, line, how sure the target is, and the fields or
+    SQL written.
+    """
+    cfg = _load(config_path, environment)
+    _echo_env(cfg)
+    try:
+        with TM1Client(cfg) as client:
+            rows = read_exports(client.service)
+    except TM1ClientError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if rows is None:
+        click.echo("}Meta_Process_Output does not exist yet. Run: tm1dd bootstrap, then")
+        click.echo("tm1dd extract-outputs.")
+        return
+    shown = filter_rows(rows, contains=contains, process=process_name, output_type=output_type)
+    if not shown:
+        click.echo(f"No exports found ({len(rows)} in the cube).")
+        if not rows:
+            click.echo("(Run 'tm1dd extract-outputs' first.)")
+        return
+    click.echo(f"{len(shown)} export(s):")
+    click.echo(f"  {'TYPE':<8} {'TARGET':<56} {'PROCESS':<40} {'LINE':>9}  RESOLVED")
+    click.echo(f"  {'-' * 8} {'-' * 56} {'-' * 40} {'-' * 9}  {'-' * 8}")
+    for r in shown:
+        target = r.target if len(r.target) <= 56 else r.target[:53] + "..."
+        process = r.process if len(r.process) <= 40 else r.process[:37] + "..."
+        where = f"{r.block}:{r.line}"
+        click.echo(f"  {r.output_type:<8} {target:<56} {process:<40} {where:>9}  {r.resolved}")
+    if csv_path:
+        write_exports_csv(csv_path, shown)
+        click.echo(f"Wrote {len(shown)} row(s) to {csv_path}")
+
+
 @main.command(name="where")
 @_config_option
 @_env_option
@@ -1041,8 +1182,16 @@ STEP_BOOTSTRAP = "bootstrap"
 STEP_TI = "ti"
 STEP_RULES = "rules"
 STEP_ELEMENTS = "elements"
+STEP_OUTPUTS = "outputs"
 STEP_VIEWS = "views"
-ALL_STEPS: tuple[str, ...] = (STEP_BOOTSTRAP, STEP_TI, STEP_RULES, STEP_ELEMENTS, STEP_VIEWS)
+ALL_STEPS: tuple[str, ...] = (
+    STEP_BOOTSTRAP,
+    STEP_TI,
+    STEP_RULES,
+    STEP_ELEMENTS,
+    STEP_OUTPUTS,
+    STEP_VIEWS,
+)
 
 STATUS_OK = "OK"
 STATUS_FAILED = "FAILED"
@@ -1103,6 +1252,12 @@ def _step_elements(
     )
 
 
+def _step_outputs(
+    ctx: click.Context, config_path: str, environment: str | None, quiet: bool
+) -> None:
+    ctx.invoke(extract_outputs_cmd, config_path=config_path, environment=environment, quiet=quiet)
+
+
 def _step_views(ctx: click.Context, config_path: str, environment: str | None, quiet: bool) -> None:
     ctx.invoke(
         create_views_cmd, config_path=config_path, environment=environment, prefix=DEFAULT_PREFIX
@@ -1117,6 +1272,7 @@ STEP_RUNNERS: dict[str, StepRunner] = {
     STEP_TI: _step_ti,
     STEP_RULES: _step_rules,
     STEP_ELEMENTS: _step_elements,
+    STEP_OUTPUTS: _step_outputs,
     STEP_VIEWS: _step_views,
 }
 
@@ -1125,6 +1281,7 @@ STEP_LABELS = {
     STEP_TI: "extract (TI lineage)",
     STEP_RULES: "extract-rules",
     STEP_ELEMENTS: "extract-elements",
+    STEP_OUTPUTS: "extract-outputs",
     STEP_VIEWS: "create-views",
 }
 
@@ -1234,10 +1391,10 @@ def run_cmd(
     keep_going: bool,
     quiet: bool,
 ) -> None:
-    """Run bootstrap, extract, extract-rules, extract-elements and create-views in one go.
+    """Run bootstrap, extract, extract-rules, extract-elements, extract-outputs and create-views.
 
     \b
-    Steps (always in this order): bootstrap, ti, rules, elements, views.
+    Steps (always in this order): bootstrap, ti, rules, elements, outputs, views.
       tm1dd run --env prod                      everything for one environment
       tm1dd run --env a --env b                 several environments, one after another
       tm1dd run --all-envs --quiet              every environment in config.yaml
