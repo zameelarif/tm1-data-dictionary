@@ -147,7 +147,9 @@ def test_summary_counts_and_lines() -> None:
     assert (summary.literal, summary.resolved, summary.partly, summary.runtime) == (2, 0, 2, 0)
     text = "\n".join(summary.as_lines())
     assert "Processes that export: 2" in text
-    assert "Export calls: 4 (2 file, 1 ODBC, 1 command)" in text
+    assert "Export call sites: 4 (2 file, 1 ODBC, 1 command)" in text
+    assert "Rows that are one of several possible targets of a call: 0" in text
+    assert "Purpose: 4 data, 0 log rows" in text
     assert "Targets: 2 literal, 0 resolved, 2 partly known, 0 runtime" in text
 
 
@@ -200,6 +202,47 @@ def test_reads_from_uses_the_source_view_and_the_cubes_read() -> None:
     ti = _proc("P", data="x = 1;", datasource=TIDatasource(type="VIEW", name_for_server="Sales"))
     reads = _ORIGINAL_READS_FROM(ti, code_lines(ti))
     assert reads == "Sales"
+
+
+BRANCHES = _proc(
+    "Cube.Branch.Export",
+    prolog=(
+        "If(pMode = 1);\n  sFile = 'a.csv';\nElse;\n  sFile = 'b.csv';\nEndIf;\n"
+        "ASCIIOutput(sFile, 'x');\nTextOutput('D:\\Logs\\ErrorLog.txt', 'oops');"
+    ),
+)
+
+
+def test_a_call_with_two_targets_counts_once_and_rows_are_alternatives() -> None:
+    service = _service([BRANCHES])
+    service.processes.get("Cube.Branch.Export").parameters = [{"Name": "pMode", "Type": "String"}]
+    summary = extract_all_outputs(_client(service))
+    assert (summary.output_calls, summary.file_exports, summary.rows_written) == (2, 2, 3)
+    assert summary.alternative_rows == 2
+    assert (summary.data_rows, summary.log_rows) == (2, 1)
+    written = service.written
+    assert written[("Cube.Branch.Export", "File", "a.csv", "Alternative")] == "Yes"
+    assert written[("Cube.Branch.Export", "File", "b.csv", "Alternative")] == "Yes"
+    log = ("Cube.Branch.Export", "File", "D:\\Logs\\ErrorLog.txt")
+    assert written[log + ("Alternative",)] == "No"
+    assert written[log + ("Purpose",)] == "Log"
+    assert written[("Cube.Branch.Export", "File", "a.csv", "Purpose")] == "Data"
+
+
+def test_bedrock_view_export_gives_a_file_row_with_the_cube() -> None:
+    proc = _proc(
+        "Cube.Employee.ExportToText",
+        prolog=(
+            "ExecuteProcess('Bedrock.Cube.View.ExportToFile', 'pCube', 'Employee', "
+            "'pExportPath', 'D:\\Export\\', 'pExportFile', 'Employee.txt');"
+        ),
+    )
+    service = _service([proc])
+    summary = extract_all_outputs(_client(service))
+    assert (summary.output_calls, summary.file_exports) == (1, 1)
+    key = ("Cube.Employee.ExportToText", "File", "D:\\Export\\Employee.txt")
+    assert service.written[key + ("Function",)] == "Bedrock.Cube.View.ExportToFile"
+    assert service.written[key + ("Detail",)] == "cube: Employee"
 
 
 def test_summary_object_defaults() -> None:

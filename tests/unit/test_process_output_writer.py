@@ -172,3 +172,25 @@ def test_empty_and_clear() -> None:
     assert write_output_lineage(_client(service), []) == 0
     clear_process_output(_client(service))
     assert service.cleared == ["}Meta_Process_Output"]
+
+
+def test_purpose_and_alternative_are_written() -> None:
+    service = _Service()
+    rows = [
+        _row("a.csv", call_id=1, alternatives=2),
+        _row("b.csv", call_id=1, alternatives=2),
+        _row("ErrorLog.txt", call_id=2, purpose="Log"),
+    ]
+    assert write_output_lineage(_client(service), rows) == 3
+    cells = service.writes[0]
+    base = ("Cube.GL.Export", "File")
+    assert cells[base + ("a.csv", "Alternative")] == "Yes"
+    assert cells[base + ("b.csv", "Alternative")] == "Yes"
+    assert cells[base + ("ErrorLog.txt", "Alternative")] == "No"
+    assert cells[base + ("ErrorLog.txt", "Purpose")] == "Log"
+    assert cells[base + ("a.csv", "Purpose")] == "Data"
+
+
+def test_a_target_reached_by_a_single_call_and_an_alternative_is_marked() -> None:
+    grouped = aggregate([_row("a.csv", line=1), _row("a.csv", line=5, alternatives=2)])
+    assert grouped[0].alternative and grouped[0].count == 2

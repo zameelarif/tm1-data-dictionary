@@ -10,7 +10,8 @@ Cube shape:
                             x }Meta_OutputMeasure
 
 Measures: Count, Function, FirstBlock, FirstLine, Lines, Resolved, Expression, Detail,
-ReadsFrom.
+ReadsFrom, Purpose (Log | Data) and Alternative (Yes when the row is one of several possible
+targets of a call, e.g. a file name set in both branches of an IF).
 
 Targets come from code, so they can hold hidden characters; every name goes through
 :func:`~tm1_data_dictionary.writers.safe_write.safe_name`, and a target longer than
@@ -68,6 +69,9 @@ class OutputRow:
     expression: str = ""
     detail: str = ""
     reads_from: str = ""
+    call_id: int = 0  # same for every target of one call; not written
+    alternatives: int = 1  # possible targets of the call
+    purpose: str = "Data"  # Log | Data
 
 
 @dataclass
@@ -75,6 +79,11 @@ class _Aggregate:
     first: OutputRow
     count: int = 0
     lines: list[int] = field(default_factory=list)
+    alternative: bool = False
+
+    @property
+    def purpose(self) -> str:
+        return self.first.purpose
 
     def lines_text(self) -> str:
         text = ", ".join(str(n) for n in self.lines)
@@ -110,6 +119,7 @@ def aggregate(rows: list[OutputRow]) -> list[_Aggregate]:
             agg = grouped[key] = _Aggregate(first=row)
         agg.count += 1
         agg.lines.append(row.line_no)
+        agg.alternative = agg.alternative or row.alternatives > 1
     return list(grouped.values())
 
 
@@ -140,6 +150,8 @@ def build_rows(
                     "Expression": safe_name(row.expression) if row.expression else "",
                     "Detail": safe_name(row.detail) if row.detail else "",
                     "ReadsFrom": row.reads_from,
+                    "Purpose": row.purpose,
+                    "Alternative": "Yes" if agg.alternative else "No",
                 },
             )
         )

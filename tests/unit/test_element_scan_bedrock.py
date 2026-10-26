@@ -213,9 +213,99 @@ def test_unknown_cube_keeps_the_filter_dimensions_only() -> None:
     assert [(h.cube, h.dimension, h.element) for h in hits] == [("(Unknown)", "Version", "Actual")]
 
 
-def test_unknown_cube_and_unreadable_filter_records_nothing() -> None:
+def test_unknown_cube_and_unreadable_filter_keeps_one_runtime_row() -> None:
     code = "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', pCube, 'pFilter', pFilter);"
-    assert _scan(code, parameters=("pCube", "pFilter")) == []
+    hits = _scan(code, parameters=("pCube", "pFilter"))
+    assert [(h.role, h.cube, h.dimension, h.element) for h in hits] == [
+        ("Clear", "(Unknown)", "(Unknown)", "(Runtime)")
+    ]
+    assert "cube pCube" in hits[0].expression and "run time" in hits[0].expression
+
+
+def test_unknown_cube_and_no_filter_keeps_one_all_row() -> None:
+    hits = _scan(
+        "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', pCube);", parameters=("pCube",)
+    )
+    assert [(h.dimension, h.element) for h in hits] == [("(Unknown)", "(All)")]
+
+
+def test_a_cube_not_in_the_model_with_an_unreadable_filter_keeps_one_row() -> None:
+    code = "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', 'Gone', 'pFilter', pFilter);"
+    hits = _scan(code, parameters=("pFilter",))
+    assert [(h.cube, h.dimension, h.element) for h in hits] == [("Gone", "(Unknown)", "(Runtime)")]
+
+
+# --------------------------------------------------------------------------- 0.3.3 filters
+def test_bedrock_4_delimiter_parameter_names_are_read() -> None:
+    code = (
+        "ExecuteProcess('}bedrock.cube.data.clear', 'pCube', 'Sales', "
+        "'pFilter', 'Version:Actual,Budget|Year:2024', "
+        "'pDimensionDelim', '|', 'pElementStartDelim', ':', 'pElementDelim', ',');"
+    )
+    rows = _rows(_scan(code))
+    assert _elements(rows, "Version") == ["Actual", "Budget"]
+    assert _elements(rows, "Year") == ["2024"]
+
+
+def test_colon_element_start_delimiter_passed_in_a_variable() -> None:
+    code = (
+        "cDelim = ':';\n"
+        "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', 'Sales', "
+        "'pFilter', 'Version:Actual', 'pEleStartDelim', cDelim);"
+    )
+    assert _elements(_rows(_scan(code)), "Version") == ["Actual"]
+
+
+def test_colon_is_tried_when_no_start_delimiter_is_passed() -> None:
+    code = (
+        "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', 'Sales', "
+        "'pFilter', 'Version:Actual&Year:2024');"
+    )
+    rows = _rows(_scan(code))
+    assert _elements(rows, "Version") == ["Actual"] and _elements(rows, "Year") == ["2024"]
+    assert _elements(rows, "Region") == ["(All)"]
+
+
+def test_colon_fallback_still_refuses_a_dimension_the_cube_does_not_have() -> None:
+    code = "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', 'Sales', 'pFilter', 'Colour:Red');"
+    rows = _rows(_scan(code))
+    assert all(h.element == "(Runtime)" for hs in rows.values() for h in hs)
+
+
+def test_filter_built_in_a_variable_keeps_its_known_parts() -> None:
+    # The CopyYear / LoadLastYear pattern: the filter is set in a variable with a parameter.
+    code = (
+        "sFilter = 'Version:Actual&Year:' | pYearTarget;\n"
+        "ExecuteProcess('}bedrock.cube.data.clear', 'pCube', 'Sales', 'pFilter', sFilter, "
+        "'pEleStartDelim', ':');"
+    )
+    rows = _rows(_scan(code, parameters=("pYearTarget",)))
+    assert _elements(rows, "Version") == ["Actual"]
+    year = rows["Year"][0]
+    assert (year.element, year.kind, year.expression) == ("(Runtime)", "Parameter", "pYearTarget")
+    assert _elements(rows, "Region") == ["(All)"] and _elements(rows, "Account") == ["(All)"]
+
+
+def test_filter_followed_through_two_variables() -> None:
+    code = (
+        "sYear = 'Year:' | pYear;\n"
+        "sFilter = 'Version:Actual&' | sYear;\n"
+        "ExecuteProcess('Bedrock.Cube.View.Create', 'pCube', 'Sales', 'pView', 'v', "
+        "'pFilter', sFilter);\n"
+        "ViewZeroOut('Sales', 'v');"
+    )
+    rows = _rows(_scan(code, parameters=("pYear",)))
+    assert _elements(rows, "Version") == ["Actual"]
+    assert rows["Year"][0].element == "(Runtime)"
+
+
+def test_a_filter_variable_that_refers_to_itself_does_not_loop() -> None:
+    code = (
+        "sFilter = pStart;\nsFilter = sFilter | '&Year:2024';\n"
+        "ExecuteProcess('Bedrock.Cube.Data.Clear', 'pCube', 'Sales', 'pFilter', sFilter);"
+    )
+    rows = _rows(_scan(code, parameters=("pStart",)))
+    assert set(rows) == set(SALES)
 
 
 def test_other_processes_are_ignored() -> None:

@@ -11,7 +11,7 @@ import pytest
 from tm1_data_dictionary.config import AppConfig, ConnectionConfig, LogConfig, RunConfig
 from tm1_data_dictionary.element_index import ElementIndex
 from tm1_data_dictionary.extract_elements import ElementSummary, extract_all_elements
-from tm1_data_dictionary.parser.ti_reader import TIDatasource, TIProcess
+from tm1_data_dictionary.parser.ti_reader import TIDatasource, TIParameter, TIProcess
 from tm1_data_dictionary.tm1_client import TM1Client
 
 CUBE_DIMS = {"Mapping": ("Account", "Mapping Measure")}
@@ -189,7 +189,6 @@ def test_a_hierarchy_that_cannot_be_read_gives_unknown() -> None:
 
 
 def test_a_hierarchy_only_known_at_run_time_gives_unknown() -> None:
-    from tm1_data_dictionary.parser.ti_reader import TIParameter
 
     _, written = _run(
         "HierarchyElementDelete('Account', pHier, 'A100');",
@@ -203,3 +202,38 @@ def test_summary_lines_show_the_new_counts() -> None:
     text = "\n".join(summary.as_lines())
     assert "created by the process itself: 0" in text
     assert "only in an alternate hierarchy: 1" in text
+
+
+# --------------------------------------------------------------------------- principal name
+def _principal(written: dict, element: str, role: str) -> str:
+    keys = [k for k in written if k[3] == element and k[4] == role and k[5] == "PrincipalElement"]
+    assert len(keys) == 1, (element, role, keys)
+    return written[keys[0]]
+
+
+def test_an_alias_gets_its_principal_name() -> None:
+    index = ElementIndex(
+        lambda d: {**{n.replace(" ", "").lower(): n for n in MODEL[d]}, "revenue": "A100"},
+        hierarchy_loader=lambda d: {},
+    )
+    _, written = _run("CellPutN(1, 'Mapping', 'Revenue', 'Target');", index=index)
+    assert _principal(written, "Revenue", "Write") == "A100"
+    assert _principal(written, "Target", "Write") == "Target"
+
+
+def test_a_missing_or_special_element_keeps_the_name_as_written() -> None:
+    _, written = _run(
+        "CellPutN(1, 'Mapping', 'Ghost', 'Target');\n" "CellPutN(1, 'Mapping', pAcc, 'Target');",
+        parameters=(TIParameter("pAcc", "String", ""),),
+    )
+    assert _principal(written, "Ghost", "Write") == "Ghost"
+    assert _principal(written, "(Runtime)", "Write") == "(Runtime)"
+
+
+def test_alternate_and_named_hierarchy_give_the_principal() -> None:
+    _, written = _run(
+        "CellPutN(1, 'Mapping', 'total bi', 'Target');\n"
+        "HierarchyElementDelete('Account', 'BI Rollup', 'bi1');"
+    )
+    assert _principal(written, "total bi", "Write") == "Total BI"
+    assert _principal(written, "bi1", "DimMaintain") == "BI1"

@@ -20,6 +20,10 @@ ElementExists has five values:
 - ``InAlternateHierarchy`` - not in the default hierarchy, but in an alternate one;
 - ``Unknown`` - the dimension, hierarchy or name could not be checked.
 
+Each row also records ``PrincipalElement``: the element's principal name when it was found
+(an alias such as ``Actual`` becomes ``1``), else the name as written - the same convention
+``}Meta_Rule_Element_Reference`` uses for its element, so TI and rule rows can be joined.
+
 Deliberately a separate command from ``tm1dd extract``, in the same way rules are, so
 element lineage can fail or be skipped without affecting the proven TI lineage cubes.
 
@@ -183,29 +187,33 @@ def _watch_lookup(
 
 def _exists(
     index: ElementIndex, dimension: str, element: str, hierarchy: str = ""
-) -> tuple[str, str]:
-    """Return ``(ElementExists, note)`` for one element.
+) -> tuple[str, str, str]:
+    """Return ``(ElementExists, note, principal name)`` for one element.
 
     With a hierarchy named in the call, that hierarchy is checked (as TM1 would). Otherwise
-    the default hierarchy is checked first, and only a miss looks in the alternate ones.
+    the default hierarchy is checked first, and only a miss looks in the alternate ones. The
+    principal name is the name as written when the element was not found.
     """
     if element in SPECIAL_ELEMENTS or dimension == UNKNOWN:
-        return EXISTS_UNKNOWN, ""
+        return EXISTS_UNKNOWN, "", element
     if not index.available(dimension):
-        return EXISTS_UNKNOWN, ""
+        return EXISTS_UNKNOWN, "", element
     if hierarchy == HIERARCHY_UNRESOLVED:
-        return EXISTS_UNKNOWN, ""
+        return EXISTS_UNKNOWN, "", element
     if hierarchy and normalise(hierarchy) != normalise(dimension):
         if not index.hierarchy_available(dimension, hierarchy):
-            return EXISTS_UNKNOWN, ""
+            return EXISTS_UNKNOWN, "", element
         found = index.lookup_in_hierarchy(dimension, hierarchy, element)
-        return (EXISTS_YES if found is not None else EXISTS_NO), ""
-    if index.lookup(dimension, element) is not None:
-        return EXISTS_YES, ""
+        if found is None:
+            return EXISTS_NO, "", element
+        return EXISTS_YES, "", found
+    principal = index.lookup(dimension, element)
+    if principal is not None:
+        return EXISTS_YES, "", principal
     other = index.find_in_other_hierarchies(dimension, element)
     if other is not None:
-        return EXISTS_ALTERNATE, f"found only in hierarchy '{other[1]}'"
-    return EXISTS_NO, ""
+        return EXISTS_ALTERNATE, f"found only in hierarchy '{other[1]}'", other[0]
+    return EXISTS_NO, "", element
 
 
 def _created_by_process(rows: list[ElementRow]) -> set[tuple[str, str, str]]:
@@ -327,7 +335,7 @@ def extract_all_elements(
     created = _created_by_process(rows)
     checked: list[ElementRow] = []
     for row in rows:
-        exists, note = _exists(index, row.dimension, row.element, row.hierarchy)
+        exists, note, principal = _exists(index, row.dimension, row.element, row.hierarchy)
         if (
             exists == EXISTS_NO
             and (row.process, normalise(row.dimension), normalise(row.element)) in created
@@ -335,7 +343,14 @@ def extract_all_elements(
             exists = EXISTS_CREATED
         expression = f"{row.expression} [{note}]" if note else row.expression
         checked.append(
-            ElementRow(**{**row.__dict__, "element_exists": exists, "expression": expression})
+            ElementRow(
+                **{
+                    **row.__dict__,
+                    "element_exists": exists,
+                    "expression": expression,
+                    "principal": principal,
+                }
+            )
         )  # frozen: rebuild
     rows = checked
     summary.element_references = sum(1 for r in rows if r.kind != KIND_WATCHLIST)

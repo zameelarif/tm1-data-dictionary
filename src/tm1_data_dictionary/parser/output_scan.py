@@ -18,8 +18,21 @@ TextOutput         File        the file path
 ODBCOutput         ODBC        the data source name (the SQL, and the table it writes to,
                                are kept as detail)
 ExecuteCommand     Command     the command line
-Bedrock export     File        directory + file name parameters, when passed as arguments
+Bedrock export     File        directory + file name parameters, when passed as arguments;
+                               the cube exported is kept as detail
 =================  ==========  ==========================================================
+
+Bedrock exports are ``Bedrock.Cube.Data.Export`` and ``Bedrock.Cube.View.ExportToFile`` (Bedrock 3
+and 4 names).
+
+**One call, one count.** A call whose target has several possible values (a file name set in
+both branches of an IF) gives one row per value, all with the same ``call_id`` and
+``alternatives`` > 1, so the caller can count call sites once and mark the rows as
+alternatives.
+
+**Purpose.** Each target is ``Log`` when its text holds the whole word log, debug,
+exception, trace or error (plurals too; words are split on punctuation, spaces and capital
+letters, so ``ErrorLog.txt`` is Log and ``ProductCatalog.csv`` is Data), else ``Data``.
 
 How sure each target is (``Resolution``):
 
@@ -82,6 +95,21 @@ _PROCESS_CALLS = frozenset({"executeprocess", "runprocess"})
 # Bedrock cube-data export processes (Bedrock 3 and 4 names).
 BEDROCK_DATA_EXPORT = frozenset({"bedrock.cube.data.export", "}bedrock.cube.data.export"})
 FUNCTION_BEDROCK_EXPORT = "Bedrock.Cube.Data.Export"
+BEDROCK_VIEW_EXPORT = frozenset(
+    {"bedrock.cube.view.exporttofile", "}bedrock.cube.view.exporttofile"}
+)
+FUNCTION_BEDROCK_VIEW_EXPORT = "Bedrock.Cube.View.ExportToFile"
+BEDROCK_EXPORTS: dict[str, str] = {
+    **{name: FUNCTION_BEDROCK_EXPORT for name in BEDROCK_DATA_EXPORT},
+    **{name: FUNCTION_BEDROCK_VIEW_EXPORT for name in BEDROCK_VIEW_EXPORT},
+}
+
+PURPOSE_LOG = "Log"
+PURPOSE_DATA = "Data"
+LOG_WORDS = frozenset(
+    {"log", "logs", "debug", "exception", "exceptions", "trace", "traces", "error", "errors"}
+)
+_WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
 BEDROCK_DIR_PARAMS = (
     "ptgtdir",
     "ptargetdir",
@@ -141,6 +169,23 @@ class OutputCall:
     resolution: str
     expression: str  # the target as written
     detail: str
+    call_id: int = 0  # the same for every target of one call
+    alternatives: int = 1  # how many possible targets the call has
+    purpose: str = PURPOSE_DATA
+
+    @property
+    def is_alternative(self) -> bool:
+        return self.alternatives > 1
+
+
+def words(text: str) -> list[str]:
+    """Split text into lower-case words at punctuation, spaces, digits and capital letters."""
+    return [w.lower() for w in _WORD.findall(text)]
+
+
+def purpose_of(text: str) -> str:
+    """Return ``Log`` if a whole word of the target is a log word, else ``Data``."""
+    return PURPOSE_LOG if any(w in LOG_WORDS for w in words(text)) else PURPOSE_DATA
 
 
 def _clean(text: str) -> str:
@@ -250,6 +295,7 @@ class OutputScanner:
         # the list again, an assignment inside IF/WHILE adds to it. Used when the traced value
         # is only partly known, so each branch's file name still shows up.
         self._assigned: dict[str, list[str]] = {}
+        self._call_count = 0
 
     @property
     def env(self) -> Env:
@@ -290,6 +336,7 @@ class OutputScanner:
         detail: str,
     ) -> None:
         block, line_no = where
+        self._call_count += 1
         for target in targets:
             note = detail
             if target.why:
@@ -307,6 +354,9 @@ class OutputScanner:
                     resolution=target.resolution,
                     expression=_truncate(expression),
                     detail=_truncate(note),
+                    call_id=self._call_count,
+                    alternatives=len(targets),
+                    purpose=purpose_of(target.text),
                 )
             )
 
@@ -328,19 +378,29 @@ class OutputScanner:
                 detail = f"wait={args[spec.detail].strip()}"
         self._add(spec.output_type, spec.name, where, targets, args[spec.target], detail)
 
-    def _bedrock_export(self, args: list[str], where: tuple[str, int]) -> None:
+    def _cube_detail(self, params: dict[str, str]) -> str:
+        """Return ``cube: <name>`` for a Bedrock export (the expression when not known)."""
+        expr = params.get("pcube")
+        if expr is None:
+            return ""
+        name = self._single(expr)
+        return f"cube: {name if name is not None else '<' + _clean(expr) + '>'}"
+
+    def _bedrock_export(self, args: list[str], where: tuple[str, int], function: str) -> None:
         params = _param_map(args[1:])
+        cube = self._cube_detail(params)
         directory = next((params[k] for k in BEDROCK_DIR_PARAMS if k in params), None)
         file_name = next((params[k] for k in BEDROCK_FILE_PARAMS if k in params), None)
         if directory is None and file_name is None:
-            literal = ", ".join(f"{k}={v}" for k, v in params.items())
+            literal = ", ".join(f"{k}={v}" for k, v in params.items() if k != "pcube")
+            detail = "; ".join(d for d in (cube, literal) if d)
             self._add(
                 TYPE_FILE,
-                FUNCTION_BEDROCK_EXPORT,
+                function,
                 where,
                 [Target(UNRECOGNISED_TARGET, RES_RUNTIME)],
                 "",
-                _truncate(literal),
+                _truncate(detail),
             )
             return
         expression = " + ".join(e for e in (directory, file_name) if e is not None)
@@ -359,7 +419,7 @@ class OutputScanner:
                 )
                 for t in only
             ]
-        self._add(TYPE_FILE, FUNCTION_BEDROCK_EXPORT, where, targets, expression, "")
+        self._add(TYPE_FILE, function, where, targets, expression, cube)
 
     def _path_part(self, expr: str | None) -> list[Target]:
         """Targets for one part of a path; an unknown part is shown as ``<expression>``."""
@@ -382,8 +442,9 @@ class OutputScanner:
                 self._function_call(spec, args, where)
             elif name in _PROCESS_CALLS and args:
                 process = self._single(args[0])
-                if process is not None and normalise(process) in BEDROCK_DATA_EXPORT:
-                    self._bedrock_export(args, where)
+                function = BEDROCK_EXPORTS.get(normalise(process)) if process else None
+                if function is not None:
+                    self._bedrock_export(args, where, function)
 
     def scan(self, lines: list[CodeLine]) -> list[OutputCall]:
         """Scan the process and return every output call, in source order."""

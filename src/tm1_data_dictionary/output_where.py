@@ -2,7 +2,8 @@
 
 Reads ``}Meta_Process_Output`` through its default view, so it shows the last
 ``extract-outputs`` run and re-parses nothing. One row per process and target: the export
-file (or DSN, or command), the process that writes it, and the details.
+file (or DSN, or command), the process that writes it, and the details. Rows can be filtered
+by Purpose (Data or Log), so log and error files can be left out.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ class ExportRow:
     expression: str
     detail: str
     reads_from: str
+    purpose: str = ""
+    alternative: str = ""
 
 
 CSV_HEADER = (
@@ -46,6 +49,8 @@ CSV_HEADER = (
     "Expression",
     "Detail",
     "ReadsFrom",
+    "Purpose",
+    "Alternative",
 )
 
 
@@ -78,6 +83,8 @@ def parse_rows(raw: dict[Any, Any]) -> list[ExportRow]:
                 expression=_text(m.get("Expression")),
                 detail=_text(m.get("Detail")),
                 reads_from=_text(m.get("ReadsFrom")),
+                purpose=_text(m.get("Purpose")),
+                alternative=_text(m.get("Alternative")),
             )
         )
     return sorted(out, key=lambda r: (r.output_type, r.target.lower(), r.process.lower()))
@@ -97,11 +104,13 @@ def filter_rows(
     contains: str | None = None,
     process: str | None = None,
     output_type: str | None = None,
+    purpose: str | None = None,
 ) -> list[ExportRow]:
-    """Keep rows whose target (or expression) contains text, from one process or type."""
+    """Keep rows whose target (or expression) contains text, from one process, type or purpose."""
     needle = (contains or "").lower()
     proc = (process or "").lower()
     kind = (output_type or "").lower()
+    use = (purpose or "").lower()
     keep = []
     for row in rows:
         if needle and needle not in row.target.lower() and needle not in row.expression.lower():
@@ -109,6 +118,8 @@ def filter_rows(
         if proc and proc not in row.process.lower():
             continue
         if kind and kind != row.output_type.lower():
+            continue
+        if use and use != row.purpose.lower():
             continue
         keep.append(row)
     return keep
@@ -133,5 +144,7 @@ def write_csv(path: str | Path, rows: list[ExportRow]) -> None:
                     r.expression,
                     r.detail,
                     r.reads_from,
+                    r.purpose,
+                    r.alternative,
                 )
             )

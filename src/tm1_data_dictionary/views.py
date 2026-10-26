@@ -185,6 +185,12 @@ VIEWS: tuple[ViewDef, ...] = (
     ),
     ViewDef(
         s.CUBE_PROCESS_OUTPUT,
+        "Data Exports",
+        "Exports that carry data (log, debug, trace and error files left out)",
+        where=("Purpose", "Data"),
+    ),
+    ViewDef(
+        s.CUBE_PROCESS_OUTPUT,
         "Runtime Exports",
         "Exports whose target is only known when the process runs",
         where=("Resolved", "Runtime"),

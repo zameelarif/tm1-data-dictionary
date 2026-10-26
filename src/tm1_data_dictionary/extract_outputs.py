@@ -4,12 +4,15 @@ For every included process:
 
 1. read it once and split it into logical lines;
 2. find each call to an output function (``ASCIIOutput``, ``TextOutput``, ``ODBCOutput``,
-   ``ExecuteCommand`` and the Bedrock data export) and work out its target - the file name,
+   ``ExecuteCommand`` and the Bedrock exports) and work out its target - the file name,
    data source or command - with the variable tracking of :mod:`output_scan`;
 3. note which cubes the process reads (its data-source view and its ``CellGet`` cubes), so
    each export shows where its data comes from.
 
 Then clear ``}Meta_Process_Output`` and write the rows.
+
+Calls are counted once per call site: a call with two possible targets (a file name set in
+both branches of an IF) gives two rows, both marked Alternative, but one call.
 
 Deliberately separate from ``tm1dd extract``, like rules and elements, so a problem here can
 never affect the proven TI lineage cubes.
@@ -28,6 +31,7 @@ from tm1_data_dictionary.exclusions import ExclusionRules, partition
 from tm1_data_dictionary.parser.blocks import code_lines
 from tm1_data_dictionary.parser.const_prop import build_const_table
 from tm1_data_dictionary.parser.output_scan import (
+    PURPOSE_LOG,
     RES_LITERAL,
     RES_PARTLY,
     RES_RESOLVED,
@@ -43,6 +47,7 @@ from tm1_data_dictionary.parser.ti_reader import TIReader
 from tm1_data_dictionary.tm1_client import TM1Client
 from tm1_data_dictionary.writers.process_output_writer import (
     OutputRow,
+    aggregate,
     clear_process_output,
     write_output_lineage,
 )
@@ -72,6 +77,9 @@ class OutputSummary:
     resolved: int = 0
     partly: int = 0
     runtime: int = 0
+    alternative_rows: int = 0
+    log_rows: int = 0
+    data_rows: int = 0
     write_report: WriteReport = field(default_factory=WriteReport)
     failed_names: list[tuple[str, str]] = field(default_factory=list)
     dry_run: bool = False
@@ -87,9 +95,11 @@ class OutputSummary:
             f"Processes that export: {self.processes_with_outputs}",
             f"Export rows: {self.rows_written}{written}",
             (
-                f"Export calls: {self.output_calls} "
+                f"Export call sites: {self.output_calls} "
                 f"({self.file_exports} file, {self.odbc_exports} ODBC, {self.commands} command)"
             ),
+            f"Rows that are one of several possible targets of a call: {self.alternative_rows}",
+            f"Purpose: {self.data_rows} data, {self.log_rows} log rows",
             (
                 f"Targets: {self.literal} literal, {self.resolved} resolved, "
                 f"{self.partly} partly known, {self.runtime} runtime"
@@ -166,6 +176,9 @@ def extract_all_outputs(
                         expression=call.expression,
                         detail=call.detail,
                         reads_from=reads,
+                        call_id=call.call_id,
+                        alternatives=call.alternatives,
+                        purpose=call.purpose,
                     )
                 )
             summary.parsed_ok += 1
@@ -177,15 +190,17 @@ def extract_all_outputs(
         if progress is not None:
             progress(i, total, name, status)
 
-    summary.output_calls = len(rows)
     summary.processes_with_outputs = len({r.process for r in rows})
+    sites: dict[tuple[str, int], str] = {(r.process, r.call_id): r.output_type for r in rows}
+    summary.output_calls = len(sites)
+    summary.file_exports = sum(1 for t in sites.values() if t == TYPE_FILE)
+    summary.odbc_exports = sum(1 for t in sites.values() if t == TYPE_ODBC)
+    summary.commands = sum(1 for t in sites.values() if t == TYPE_COMMAND)
+    grouped = aggregate(rows)
+    summary.alternative_rows = sum(1 for g in grouped if g.alternative)
+    summary.log_rows = sum(1 for g in grouped if g.purpose == PURPOSE_LOG)
+    summary.data_rows = len(grouped) - summary.log_rows
     for row in rows:
-        if row.output_type == TYPE_FILE:
-            summary.file_exports += 1
-        elif row.output_type == TYPE_ODBC:
-            summary.odbc_exports += 1
-        elif row.output_type == TYPE_COMMAND:
-            summary.commands += 1
         if row.resolution == RES_LITERAL:
             summary.literal += 1
         elif row.resolution == RES_RESOLVED:

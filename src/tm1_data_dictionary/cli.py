@@ -71,7 +71,7 @@ from tm1_data_dictionary.writers.audit_writer import AuditWriter
 from tm1_data_dictionary.writers.process_chain_writer import write_chain_lineage
 from tm1_data_dictionary.writers.process_cube_writer import write_cube_lineage
 
-SCHEMA_VERSION = "1.9"
+SCHEMA_VERSION = "1.10"
 
 
 # --------------------------------------------------------------------------- #
@@ -1010,10 +1010,11 @@ def extract_outputs_cmd(config_path: str, environment: str | None, quiet: bool) 
     """Extract what EVERY process exports into }Meta_Process_Output.
 
     Finds each call to ASCIIOutput, TextOutput, ODBCOutput, ExecuteCommand and the Bedrock
-    data export, works out the target (export file name, data source or command, following
+    exports (Cube.Data.Export, Cube.View.ExportToFile), works out the target (export file name, data source or command, following
     variables), and records the process, line, fields or SQL, and the cubes it reads.
     Targets only partly known (a file name with a parameter in it) are kept, with the
-    unknown part shown in angle brackets.
+    unknown part shown in angle brackets. Each row gets a Purpose (Log or Data), and rows
+    that are one of several possible targets of a call are marked Alternative.
 
     Deliberately separate from 'extract'. Records the run into }Meta_Extraction_Audit.
     Honours dry-run mode. List the result with 'tm1dd exports'.
@@ -1055,6 +1056,9 @@ def extract_outputs_cmd(config_path: str, environment: str | None, quiet: bool) 
                             "output_odbc": summary.odbc_exports,
                             "output_commands": summary.commands,
                             "output_runtime": summary.runtime,
+                            "output_alternative_rows": summary.alternative_rows,
+                            "output_log_rows": summary.log_rows,
+                            "output_data_rows": summary.data_rows,
                         },
                     )
                     audit_recorded = True
@@ -1085,6 +1089,12 @@ def extract_outputs_cmd(config_path: str, environment: str | None, quiet: bool) 
     default=None,
     help="Only this kind of export.",
 )
+@click.option(
+    "--purpose",
+    type=click.Choice(["Data", "Log"], case_sensitive=False),
+    default=None,
+    help="Only data exports, or only log/debug/error files.",
+)
 @click.option("--csv", "csv_path", default=None, help="Also write the rows to this CSV file.")
 def exports_cmd(
     config_path: str,
@@ -1092,13 +1102,14 @@ def exports_cmd(
     contains: str | None,
     process_name: str | None,
     output_type: str | None,
+    purpose: str | None,
     csv_path: str | None,
 ) -> None:
     """List the files, databases and commands TI processes write to (read-only).
 
     Reads }Meta_Process_Output, so it shows the last 'extract-outputs' run. One row per
     process and target, with the function, line, how sure the target is, and the fields or
-    SQL written.
+    SQL written. Rows marked * are one of several possible targets of one call.
     """
     cfg = _load(config_path, environment)
     _echo_env(cfg)
@@ -1111,20 +1122,26 @@ def exports_cmd(
         click.echo("}Meta_Process_Output does not exist yet. Run: tm1dd bootstrap, then")
         click.echo("tm1dd extract-outputs.")
         return
-    shown = filter_rows(rows, contains=contains, process=process_name, output_type=output_type)
+    shown = filter_rows(
+        rows, contains=contains, process=process_name, output_type=output_type, purpose=purpose
+    )
     if not shown:
         click.echo(f"No exports found ({len(rows)} in the cube).")
         if not rows:
             click.echo("(Run 'tm1dd extract-outputs' first.)")
         return
     click.echo(f"{len(shown)} export(s):")
-    click.echo(f"  {'TYPE':<8} {'TARGET':<56} {'PROCESS':<40} {'LINE':>9}  RESOLVED")
-    click.echo(f"  {'-' * 8} {'-' * 56} {'-' * 40} {'-' * 9}  {'-' * 8}")
+    click.echo(f"  {'TYPE':<8} {'TARGET':<56} {'PROCESS':<40} {'LINE':>9}  {'PURPOSE':<7} RESOLVED")
+    click.echo(f"  {'-' * 8} {'-' * 56} {'-' * 40} {'-' * 9}  {'-' * 7} {'-' * 8}")
     for r in shown:
         target = r.target if len(r.target) <= 56 else r.target[:53] + "..."
         process = r.process if len(r.process) <= 40 else r.process[:37] + "..."
         where = f"{r.block}:{r.line}"
-        click.echo(f"  {r.output_type:<8} {target:<56} {process:<40} {where:>9}  {r.resolved}")
+        mark = " *" if r.alternative == "Yes" else ""
+        click.echo(
+            f"  {r.output_type:<8} {target:<56} {process:<40} {where:>9}  "
+            f"{r.purpose:<7} {r.resolved}{mark}"
+        )
     if csv_path:
         write_exports_csv(csv_path, shown)
         click.echo(f"Wrote {len(shown)} row(s) to {csv_path}")

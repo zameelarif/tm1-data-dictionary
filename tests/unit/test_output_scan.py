@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tm1_data_dictionary.parser.blocks import CodeLine
 from tm1_data_dictionary.parser.output_scan import (
     RUNTIME_PREFIX,
     UNRECOGNISED_TARGET,
     OutputCall,
     OutputScanner,
+    purpose_of,
     resolve_text,
 )
 from tm1_data_dictionary.parser.var_trace import Env
@@ -241,3 +244,78 @@ def test_resolve_text_limits_the_number_of_values() -> None:
         env.assign("v", f"'x{i}'")
         env.values["v"] = frozenset(f"x{i}" for i in range(30))
     assert len(resolve_text(env, "v")) == 12
+
+
+# --------------------------------------------------------------------------- 0.3.3
+def test_bedrock_view_export_to_file_is_found_with_its_cube() -> None:
+    code = _bedrock(
+        "Bedrock.Cube.View.ExportToFile",
+        "'pExportPath', 'D:\\Export\\', 'pExportFile', 'Sales.txt'",
+    )
+    calls = _scan(code)
+    assert _targets(calls) == [("File", "D:\\Export\\Sales.txt", "Literal")]
+    assert calls[0].function == "Bedrock.Cube.View.ExportToFile"
+    assert calls[0].detail == "cube: Sales"
+
+
+def test_bedrock_4_view_export_name_and_unknown_cube() -> None:
+    code = (
+        "ExecuteProcess('}bedrock.cube.view.exporttofile', 'pCube', pCube, "
+        "'pExportPath', pPath, 'pExportFile', 'x.csv');"
+    )
+    calls = _scan(code, parameters=("pCube", "pPath"))
+    assert _targets(calls) == [("File", "<pPath>\\x.csv", "Partly")]
+    assert calls[0].detail.endswith("cube: <pCube>")
+
+
+def test_bedrock_data_export_records_the_cube_too() -> None:
+    code = _bedrock("Bedrock.Cube.Data.Export", "'pFile', 'x.csv'")
+    assert _scan(code)[0].detail == "cube: Sales"
+
+
+def test_bedrock_unrecognised_parameters_keep_the_cube() -> None:
+    calls = _scan(_bedrock("Bedrock.Cube.View.ExportToFile", "'pOther', 'x'"))
+    assert calls[0].detail == "cube: Sales; pother='x'"
+
+
+def test_one_call_with_two_targets_shares_a_call_id() -> None:
+    prolog = (
+        "If(pMode = 1);\n  sFile = 'a.csv';\nElse;\n  sFile = 'b.csv';\nEndIf;\n"
+        "ASCIIOutput(sFile, 'x');\nASCIIOutput('c.csv', 'y');"
+    )
+    calls = _scan(prolog, parameters=("pMode",))
+    assert [(c.target, c.call_id, c.alternatives) for c in calls] == [
+        ("a.csv", 1, 2),
+        ("b.csv", 1, 2),
+        ("c.csv", 2, 1),
+    ]
+    assert [c.is_alternative for c in calls] == [True, True, False]
+
+
+def test_two_calls_on_one_line_are_two_calls() -> None:
+    calls = _scan("ASCIIOutput('a.csv', 'x'); ASCIIOutput('a.csv', 'y');")
+    assert [c.call_id for c in calls] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("target", "purpose"),
+    [
+        ("D:\\Logs\\GL.csv", "Log"),
+        ("ErrorLog.txt", "Log"),
+        ("TM1_debug_out.txt", "Log"),
+        ("Exceptions.csv", "Log"),
+        ("TRACE.txt", "Log"),
+        ("ProductCatalog.csv", "Data"),
+        ("Login_users.csv", "Data"),
+        ("Dialog.txt", "Data"),
+        ("GL_Export.csv", "Data"),
+        ("Errorless.csv", "Data"),
+    ],
+)
+def test_purpose_is_matched_on_whole_words(target: str, purpose: str) -> None:
+    assert purpose_of(target) == purpose
+
+
+def test_purpose_is_set_on_each_call() -> None:
+    calls = _scan("ASCIIOutput('D:\\Logs\\run.csv', 'x');\nASCIIOutput('D:\\Out\\gl.csv', 'y');")
+    assert [c.purpose for c in calls] == ["Log", "Data"]

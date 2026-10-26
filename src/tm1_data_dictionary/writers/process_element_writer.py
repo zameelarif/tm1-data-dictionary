@@ -4,7 +4,8 @@ Consumes :class:`ElementRow` objects - static hits from
 :mod:`~tm1_data_dictionary.parser.element_scan` and watch-list hits - and aggregates them
 to **one row per (process, cube, dimension, element, role)** before writing. The first
 occurrence supplies the location and description; ``Count`` says how many statements
-were rolled in.
+were rolled in. ``PrincipalElement`` holds the principal name (aliases resolved), the same
+name ``}Meta_Rule_Element_Reference`` stores, so the two cubes can be joined.
 
 Cube shape:
     }Meta_Process_Element :  }Meta_Process x }Meta_Cube x }Meta_Dimension x }Meta_Element
@@ -73,6 +74,7 @@ class ElementRow:
     statement: str = ""
     element_exists: str = "Unknown"  # Yes | No | Unknown | CreatedByProcess | InAlternateHierarchy
     hierarchy: str = ""  # hierarchy named in the call; used for the existence check, not stored
+    principal: str = ""  # principal name (alias resolved); "" means use the element as written
 
     @property
     def key(self) -> tuple[str, str, str, str, str]:
@@ -125,6 +127,7 @@ def build_rows(
                     "Expression": safe_name(row.expression),
                     "ElementExists": row.element_exists,
                     "Statement": safe_name(row.statement),
+                    "PrincipalElement": safe_name(row.principal or row.element),
                 },
             )
         )

@@ -88,5 +88,23 @@ def test_exports_when_nothing_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     assert empty.exit_code == 0
 
 
-def test_schema_version_is_1_9() -> None:
-    assert cli.SCHEMA_VERSION == "1.9"
+def test_schema_version_is_1_10() -> None:
+    assert cli.SCHEMA_VERSION == "1.10"
+
+
+def test_exports_purpose_filter_and_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = ExportRow(
+        "File", "GL.csv", "P", "ASCIIOutput", "Data", 9, 1, "Literal", "", "", "", "Data", "Yes"
+    )
+    log = ExportRow(
+        "File", "ErrorLog.txt", "P", "TextOutput", "Data", 3, 1, "Literal", "", "", "", "Log", "No"
+    )
+    monkeypatch.setattr(cli, "read_exports", lambda service: [data, log])
+    result = CliRunner().invoke(cli.main, ["exports", "--purpose", "data"])
+    assert result.exit_code == 0, result.output
+    assert "1 export(s):" in result.output and "GL.csv" in result.output
+    assert "ErrorLog.txt" not in result.output
+    assert "PURPOSE" in result.output and "Literal *" in result.output
+    logs = CliRunner().invoke(cli.main, ["exports", "--purpose", "LOG"])
+    assert "ErrorLog.txt" in logs.output and "GL.csv" not in logs.output
+    assert CliRunner().invoke(cli.main, ["exports", "--purpose", "x"]).exit_code == 2

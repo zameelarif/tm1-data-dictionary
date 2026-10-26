@@ -339,6 +339,7 @@ PROCESS_ELEMENT_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Expression", STRING),  # the argument as written
     ElementDef("ElementExists", STRING),  # Yes | No | Unknown
     ElementDef("Statement", STRING),  # the statement (truncated)
+    ElementDef("PrincipalElement", STRING),  # principal name (alias resolved), to join with rules
 )
 
 # Where a TI process sends data, in }Meta_Process_Output.
@@ -359,6 +360,8 @@ PROCESS_OUTPUT_MEASURES: tuple[ElementDef, ...] = (
     ElementDef("Expression", STRING),  # the target as written in the code
     ElementDef("Detail", STRING),  # fields written, SQL statement, wait flag, why unresolved
     ElementDef("ReadsFrom", STRING),  # cubes the process reads (its source, to know what leaves)
+    ElementDef("Purpose", STRING),  # Log | Data - Log when the target names a log/error file
+    ElementDef("Alternative", STRING),  # Yes | No - one of several possible targets of a call
 )
 
 # The measures captured for each extractor run. String where the value is text, Numeric

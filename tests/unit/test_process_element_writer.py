@@ -194,3 +194,13 @@ def test_refused_row_is_skipped_and_reported(fake_tm1py_element: None) -> None:
     written = write_element_lineage(_client(service), [_row(), _row("Bad")], report)
     assert written == 1
     assert report.rows_not_written == 1
+
+
+def test_principal_name_is_written(fake_tm1py_element: None) -> None:
+    service = _FakeService()
+    alias = ElementRow(**{**_row("Actual").__dict__, "principal": "1"})
+    write_element_lineage(_client(service), [alias, _row("Budget")])
+    _, cells = service.cells.writes[0]
+    base = ("P", "Sales", "Version")
+    assert cells[base + ("Actual", "Write", "PrincipalElement")] == "1"
+    assert cells[base + ("Budget", "Write", "PrincipalElement")] == "Budget"

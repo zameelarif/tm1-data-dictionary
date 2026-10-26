@@ -119,3 +119,27 @@ def test_csv(tmp_path: Path) -> None:
     assert lines[0].startswith("Type,Target,Process,Function")
     assert len(lines) == 4
     assert "D:\\Export\\GL.csv" in lines[1]
+
+
+def test_purpose_and_alternative_are_read_filtered_and_written(tmp_path: Path) -> None:
+    raw = {
+        **_cells("P", "File", "GL.csv", Purpose="Data", Alternative="Yes"),
+        **_cells("P", "File", "ErrorLog.txt", Purpose="Log", Alternative="No"),
+    }
+    rows = parse_rows(raw)
+    assert [(r.target, r.purpose, r.alternative) for r in rows] == [
+        ("ErrorLog.txt", "Log", "No"),
+        ("GL.csv", "Data", "Yes"),
+    ]
+    assert [r.target for r in filter_rows(rows, purpose="data")] == ["GL.csv"]
+    assert [r.target for r in filter_rows(rows, purpose="Log")] == ["ErrorLog.txt"]
+    path = tmp_path / "x.csv"
+    write_csv(path, rows)
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    assert lines[0].endswith("ReadsFrom,Purpose,Alternative")
+    assert lines[2].endswith(",Data,Yes")
+
+
+def test_rows_from_an_older_schema_have_empty_purpose() -> None:
+    rows = parse_rows(_cells("P", "File", "a.csv"))
+    assert rows[0].purpose == "" and filter_rows(rows, purpose="Data") == []

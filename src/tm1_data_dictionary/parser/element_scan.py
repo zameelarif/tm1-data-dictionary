@@ -27,7 +27,10 @@ Views described by a **Bedrock filter string** are followed too (see :mod:`bedro
 
 Parts of the filter that are only known at run time (a parameter, a source variable) are
 recorded as ``(Runtime)`` with the expression; a filter that cannot be read at all marks every
-dimension ``(Runtime)``, never ``(All)``. A filter that names a dimension the cube does not
+dimension ``(Runtime)``, never ``(All)``. A filter built in a variable
+(``sFilter = 'Year:' | pYear``) is followed through the expression that set it, so the known
+parts still resolve. A clear whose cube is unknown and whose filter cannot be read still gives
+one ``(Runtime)`` row (dimension ``(Unknown)``), so it never drops out. A filter that names a dimension the cube does not
 have is treated the same way, so a wrong delimiter assumption cannot produce wrong elements.
 
 Functions that name a hierarchy (``HierarchyElementInsert`` ...) record it on the hit, so the
@@ -101,6 +104,17 @@ CubeDimensions = Callable[[str], "tuple[str, ...] | None"]
 
 _NAME_BEFORE_PAREN = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _MDX_DIM = re.compile(r"\[([^\]]+)\]")
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_DEPTH = 5
+
+# Bedrock delimiter parameters: (Bedrock 3 name, Bedrock 4 name, default).
+DELIMITER_PARAMS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("pdimdelim", "pdimensiondelim"), DEFAULT_DIM_DELIM),
+    (("pelestartdelim", "pelementstartdelim"), DEFAULT_ELE_START_DELIM),
+    (("peledelim", "pelementdelim"), DEFAULT_ELE_DELIM),
+)
+# Tried when no element-start delimiter is passed and the default does not fit the cube.
+FALLBACK_ELE_START_DELIM = ":"
 
 
 def _truncate(text: str) -> str:
@@ -147,6 +161,7 @@ class _ViewState:
         default_factory=dict
     )  # dim key -> (dim, hierarchy, members as (element, kind, confidence, expression))
     filter_runtime: str = ""  # the filter expression when it could not be read
+    cube_expr: str = ""  # the cube argument as written, when the cube is not known
 
 
 def _kind_for(resolved: Resolved) -> tuple[str, str]:
@@ -478,6 +493,18 @@ class ElementScanner:
     ) -> None:
         """Emit a Bedrock view: the filter's elements, (All) for the rest, or (Runtime)."""
         names = list(dims) if dims else [d for d, _, _ in view.filters.values()]
+        if not names:
+            # Nothing to say per dimension (cube unknown): keep one row so the clear is seen.
+            note = "; ".join(
+                t
+                for t in (f"cube {view.cube_expr}" if view.cube_expr else "", view.filter_runtime)
+                if t
+            )
+            element = ELEMENT_RUNTIME if view.filter_runtime else ELEMENT_ALL
+            kind = CONF_RUNTIME if view.filter_runtime else KIND_ALL
+            confidence = CONF_RUNTIME if view.filter_runtime else CONF_RESOLVED
+            self._add(view.cube, UNKNOWN, element, role, where, fn, kind, confidence, note)
+            return
         if view.filter_runtime:
             for dim in names:
                 self._add(
@@ -562,6 +589,8 @@ class ElementScanner:
         else:
             cube = self._single(cube_expr) if cube_expr is not None else None
             view = _ViewState(cube=cube or UNKNOWN)
+            if cube is None and cube_expr is not None:
+                view.cube_expr = self.env.describe(cube_expr)
         self._apply_bedrock_filter(view, params)
         if function == FUNCTION_DATA_CLEAR:
             self._emit_view(view, ROLE_CLEAR, where, function)
@@ -574,17 +603,32 @@ class ElementScanner:
         ``{marker: (expression, reason)}`` says what it was. This keeps the known parts of a
         filter such as ``'Version' | d | 'Actual&Year' | d | pYear`` usable.
         """
-        pieces: list[str] = []
         unknown: dict[str, tuple[str, str]] = {}
+        return "".join(self._pieces(expr, unknown, 0)), unknown
+
+    def _pieces(self, expr: str, unknown: dict[str, tuple[str, str]], depth: int) -> list[str]:
+        """Known text or a marker per ``|`` piece; unknown variables are expanded through the
+        expression that set them (as :func:`output_scan._pieces` does)."""
+        pieces: list[str] = []
         for part in _split_top_level(expr, "|"):
             resolved = self.env.evaluate(part)
             if resolved.values is not None and len(resolved.values) == 1:
                 pieces.append(next(iter(resolved.values)))
                 continue
+            name = part.strip()
+            source = self.env.sources.get(name.lower()) if _IDENT.match(name) else None
+            if (
+                resolved.values is None
+                and source
+                and depth < _MAX_DEPTH
+                and name.lower() not in source.lower()
+            ):
+                pieces.extend(self._pieces(source, unknown, depth + 1))
+                continue
             marker = f"{_MARK}{len(unknown)}{_MARK}"
             unknown[marker] = (self.env.describe(part), resolved.reason or REASON_RUNTIME)
             pieces.append(marker)
-        return "".join(pieces), unknown
+        return pieces
 
     def _apply_bedrock_filter(self, view: _ViewState, params: dict[str, str]) -> None:
         """Read the pFilter argument into ``view.filters`` (or ``view.filter_runtime``)."""
@@ -595,20 +639,20 @@ class ElementScanner:
         if filter_expr is None or not filter_expr.strip():
             return  # no filter: the whole cube, so every dimension is (All)
         delimiters: list[str] = []
-        for key, default in (
-            ("pdimdelim", DEFAULT_DIM_DELIM),
-            ("pelestartdelim", DEFAULT_ELE_START_DELIM),
-            ("peledelim", DEFAULT_ELE_DELIM),
-        ):
-            expr = params.get(key)
-            if expr is None:
+        start_given = False
+        for names, default in DELIMITER_PARAMS:
+            key = next((n for n in names if n in params), None)
+            if key is None:
                 delimiters.append(default)
                 continue
-            value = self._single(expr)
+            value = self._single(params[key])
             if not value:
-                view.filter_runtime = f"{key} is not a known value: {self.env.describe(expr)}"
+                view.filter_runtime = (
+                    f"{key} is not a known value: {self.env.describe(params[key])}"
+                )
                 return
             delimiters.append(value)
+            start_given = start_given or names[0] == "pelestartdelim"
         text, unknown = self._partial_text(filter_expr)
         expression = self.env.describe(filter_expr)
         remainder = text
@@ -617,31 +661,48 @@ class ElementScanner:
         if unknown and not remainder.strip():
             view.filter_runtime = f"the filter is only known at run time: {expression}"
             return
+        literal = self.env.evaluate(filter_expr).literal and not unknown
+        filters, problem = self._read_filter(view, text, delimiters, unknown, literal, expression)
+        fallback = FALLBACK_ELE_START_DELIM
+        if problem and not start_given and fallback in remainder and fallback != delimiters[1]:
+            retry = [delimiters[0], fallback, delimiters[2]]
+            filters2, problem2 = self._read_filter(view, text, retry, unknown, literal, expression)
+            if not problem2:
+                filters, problem = filters2, ""
+        view.filters = filters
+        view.filter_runtime = problem
+
+    def _read_filter(
+        self,
+        view: _ViewState,
+        text: str,
+        delimiters: list[str],
+        unknown: dict[str, tuple[str, str]],
+        literal: bool,
+        expression: str,
+    ) -> tuple[dict[str, tuple[str, str, list[tuple[str, str, str, str]]]], str]:
+        """Parse the filter text with one set of delimiters: ``(filters, problem)``."""
         parts = parse_filter(text, delimiters[0], delimiters[1], delimiters[2])
         if parts is None:
-            view.filter_runtime = f"filter not understood: {expression}"
-            return
+            return {}, f"filter not understood: {expression}"
         dims = self.cube_dimensions(view.cube) if view.cube != UNKNOWN else None
         canonical = {normalise(d): d for d in dims} if dims else {}
-        literal = self.env.evaluate(filter_expr).literal and not unknown
+        filters: dict[str, tuple[str, str, list[tuple[str, str, str, str]]]] = {}
         for part in parts:
             if _MARK in part.dimension:
-                view.filters = {}
-                view.filter_runtime = f"a dimension in the filter is not known: {expression}"
-                return
+                return {}, f"a dimension in the filter is not known: {expression}"
             dim, hierarchy = _filter_dimension(part.dimension, canonical)
             if dim is None:
-                view.filters = {}
-                view.filter_runtime = (
+                return {}, (
                     f"filter names {part.dimension!r}, which the cube does not have: {expression}"
                 )
-                return
             members = [_filter_member(e, unknown, literal, part.raw) for e in part.elements]
             key = normalise(dim)
-            if key in view.filters:
-                view.filters[key][2].extend(members)
+            if key in filters:
+                filters[key][2].extend(members)
             else:
-                view.filters[key] = (dim, hierarchy, members)
+                filters[key] = (dim, hierarchy, members)
+        return filters, ""
 
     # ------------------------------------------------------------------ main
     def _scan_calls(self, text: str, where: tuple[str, int, str]) -> None:
