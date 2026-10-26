@@ -310,6 +310,10 @@ def test_two_calls_on_one_line_are_two_calls() -> None:
         ("Dialog.txt", "Data"),
         ("GL_Export.csv", "Data"),
         ("Errorless.csv", "Data"),
+        ("<CellGetS(c, 'Location: Debugging', 'String')>x.csv", "Log"),
+        ("D:\\Logging\\run.txt", "Log"),
+        ("Logfile.txt", "Log"),
+        ("Blogging.csv", "Data"),
     ],
 )
 def test_purpose_is_matched_on_whole_words(target: str, purpose: str) -> None:
@@ -319,3 +323,39 @@ def test_purpose_is_matched_on_whole_words(target: str, purpose: str) -> None:
 def test_purpose_is_set_on_each_call() -> None:
     calls = _scan("ASCIIOutput('D:\\Logs\\run.csv', 'x');\nASCIIOutput('D:\\Out\\gl.csv', 'y');")
     assert [c.purpose for c in calls] == ["Log", "Data"]
+
+
+def test_bedrock_empty_path_and_file_use_the_bedrock_defaults() -> None:
+    code = _bedrock("Bedrock.Cube.View.ExportToFile", "'pExportPath', '', 'pExportFile', ''")
+    calls = _scan(code)
+    assert _targets(calls) == [
+        ("File", "<Bedrock default folder>\\<Bedrock default file: Sales>", "Partly")
+    ]
+    assert (
+        calls[0].detail
+        == "cube: Sales; Bedrock default folder and file name used (empty parameter)"
+    )
+    assert calls[0].purpose == "Data"
+
+
+def test_bedrock_empty_file_keeps_the_known_folder() -> None:
+    code = "cPath = 'C:\\Export';\n" + _bedrock(
+        "Bedrock.Cube.View.ExportToFile", "'pExportPath', cPath, 'pExportFile', ''"
+    )
+    calls = _scan(code)
+    assert _targets(calls) == [("File", "C:\\Export\\<Bedrock default file: Sales>", "Partly")]
+    assert calls[0].detail.endswith("Bedrock default file name used (empty parameter)")
+
+
+def test_bedrock_empty_file_with_an_unknown_cube() -> None:
+    code = (
+        "ExecuteProcess('Bedrock.Cube.View.ExportToFile', 'pCube', pCube, "
+        "'pExportPath', 'C:\\Export', 'pExportFile', '');"
+    )
+    calls = _scan(code, parameters=("pCube",))
+    assert _targets(calls) == [("File", "C:\\Export\\<Bedrock default file>", "Partly")]
+
+
+def test_bedrock_only_an_empty_file_parameter() -> None:
+    calls = _scan(_bedrock("Bedrock.Cube.Data.Export", "'pFile', ''"))
+    assert _targets(calls) == [("File", "<Bedrock default file: Sales>", "Partly")]

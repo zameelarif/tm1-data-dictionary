@@ -150,7 +150,7 @@ def test_summary_counts_and_lines() -> None:
     assert "Export call sites: 4 (2 file, 1 ODBC, 1 command)" in text
     assert "Rows that are one of several possible targets of a call: 0" in text
     assert "Purpose: 4 data, 0 log rows" in text
-    assert "Targets: 2 literal, 0 resolved, 2 partly known, 0 runtime" in text
+    assert "Target rows: 2 literal, 0 resolved, 2 partly known, 0 runtime" in text
 
 
 def test_dry_run_writes_nothing() -> None:
@@ -247,3 +247,29 @@ def test_bedrock_view_export_gives_a_file_row_with_the_cube() -> None:
 
 def test_summary_object_defaults() -> None:
     assert "Export rows: 0 written" in "\n".join(OutputSummary().as_lines())
+
+
+def test_target_counts_add_up_to_the_rows_written() -> None:
+    proc = _proc(
+        "Cube.Repeat",
+        prolog="ASCIIOutput('a.csv', 'x');\nASCIIOutput('a.csv', 'y');\nASCIIOutput('b.csv', 'z');",
+    )
+    summary = extract_all_outputs(_client(_service([proc])))
+    assert summary.output_calls == 3 and summary.rows_written == 2
+    total = summary.literal + summary.resolved + summary.partly + summary.runtime
+    assert total == summary.rows_written
+
+
+def test_bedrock_exports_with_empty_parameters_give_one_row_per_cube() -> None:
+    calls = "".join(
+        f"ExecuteProcess('Bedrock.Cube.View.ExportToFile', 'pCube', '{cube}', "
+        "'pExportPath', cPath, 'pExportFile', '');\n"
+        for cube in ("Employee", "General Ledger")
+    )
+    proc = _proc("Cube.ExportToText", prolog="cPath = 'D:\\Export';\n" + calls)
+    service = _service([proc])
+    summary = extract_all_outputs(_client(service))
+    assert (summary.output_calls, summary.rows_written) == (2, 2)
+    key = ("Cube.ExportToText", "File", "D:\\Export\\<Bedrock default file: Employee>")
+    assert service.written[key + ("Resolved",)] == "Partly"
+    assert service.written[key + ("Purpose",)] == "Data"

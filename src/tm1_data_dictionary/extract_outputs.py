@@ -101,7 +101,7 @@ class OutputSummary:
             f"Rows that are one of several possible targets of a call: {self.alternative_rows}",
             f"Purpose: {self.data_rows} data, {self.log_rows} log rows",
             (
-                f"Targets: {self.literal} literal, {self.resolved} resolved, "
+                f"Target rows: {self.literal} literal, {self.resolved} resolved, "
                 f"{self.partly} partly known, {self.runtime} runtime"
             ),
         ]
@@ -200,14 +200,16 @@ def extract_all_outputs(
     summary.alternative_rows = sum(1 for g in grouped if g.alternative)
     summary.log_rows = sum(1 for g in grouped if g.purpose == PURPOSE_LOG)
     summary.data_rows = len(grouped) - summary.log_rows
-    for row in rows:
-        if row.resolution == RES_LITERAL:
+    # Counted per written row (after roll-up), so the Targets line adds up to Export rows.
+    for agg in grouped:
+        resolution = agg.first.resolution
+        if resolution == RES_LITERAL:
             summary.literal += 1
-        elif row.resolution == RES_RESOLVED:
+        elif resolution == RES_RESOLVED:
             summary.resolved += 1
-        elif row.resolution == RES_PARTLY:
+        elif resolution == RES_PARTLY:
             summary.partly += 1
-        elif row.resolution == RES_RUNTIME:
+        elif resolution == RES_RUNTIME:
             summary.runtime += 1
 
     if not client.dry_run:

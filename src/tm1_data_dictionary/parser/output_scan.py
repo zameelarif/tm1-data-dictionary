@@ -31,7 +31,7 @@ both branches of an IF) gives one row per value, all with the same ``call_id`` a
 alternatives.
 
 **Purpose.** Each target is ``Log`` when its text holds the whole word log, debug,
-exception, trace or error (plurals too; words are split on punctuation, spaces and capital
+exception, trace or error (plurals, debugging, logging and logfile too; words are split on punctuation, spaces and capital
 letters, so ``ErrorLog.txt`` is Log and ``ProductCatalog.csv`` is Data), else ``Data``.
 
 How sure each target is (``Resolution``):
@@ -46,7 +46,9 @@ How sure each target is (``Resolution``):
 The Bedrock parameter names are an assumption: the common names for the target directory
 and file are tried in turn (see :data:`BEDROCK_DIR_PARAMS` and :data:`BEDROCK_FILE_PARAMS`).
 If neither is found the call is still recorded, as ``(parameters not recognised)``, with the
-arguments kept as detail.
+arguments kept as detail. A directory or file passed as an empty string means Bedrock picks its
+own default, so the target shows ``<Bedrock default folder>`` or ``<Bedrock default file: Cube>``
+(Resolved ``Partly``) rather than an empty path; the cube name keeps each call's row apart.
 
 Pure analysis - no TM1, no I/O.
 """
@@ -107,8 +109,27 @@ BEDROCK_EXPORTS: dict[str, str] = {
 PURPOSE_LOG = "Log"
 PURPOSE_DATA = "Data"
 LOG_WORDS = frozenset(
-    {"log", "logs", "debug", "exception", "exceptions", "trace", "traces", "error", "errors"}
+    {
+        "log",
+        "logs",
+        "logging",
+        "logfile",
+        "logfiles",
+        "debug",
+        "debugging",
+        "exception",
+        "exceptions",
+        "trace",
+        "traces",
+        "error",
+        "errors",
+    }
 )
+
+# An empty pExportPath / pExportFile means Bedrock uses its own default folder or file name.
+BEDROCK_DEFAULT_FOLDER = "<Bedrock default folder>"
+BEDROCK_DEFAULT_FILE = "<Bedrock default file>"
+BEDROCK_DEFAULT_NOTE = "Bedrock default {} used (empty parameter)"
 _WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
 BEDROCK_DIR_PARAMS = (
     "ptgtdir",
@@ -404,8 +425,18 @@ class OutputScanner:
             )
             return
         expression = " + ".join(e for e in (directory, file_name) if e is not None)
-        dir_targets = self._path_part(directory)
-        file_targets = self._path_part(file_name)
+        cube_name = self._single(params["pcube"]) if "pcube" in params else None
+        default_file = f"<Bedrock default file: {cube_name}>" if cube_name else BEDROCK_DEFAULT_FILE
+        dir_targets = self._path_part(directory, BEDROCK_DEFAULT_FOLDER)
+        file_targets = self._path_part(file_name, default_file)
+        defaults = [
+            what
+            for what, expr in (("folder", directory), ("file name", file_name))
+            if expr is not None and self._single(expr) == ""
+        ]
+        if defaults:
+            note = BEDROCK_DEFAULT_NOTE.format(" and ".join(defaults))
+            cube = "; ".join(d for d in (cube, note) if d)
         if dir_targets and file_targets:
             combined = [(d, f) for d in dir_targets for f in file_targets][:MAX_TARGETS]
             targets = [_join_targets(d, f, expression) for d, f in combined]
@@ -421,10 +452,15 @@ class OutputScanner:
             ]
         self._add(TYPE_FILE, function, where, targets, expression, cube)
 
-    def _path_part(self, expr: str | None) -> list[Target]:
-        """Targets for one part of a path; an unknown part is shown as ``<expression>``."""
+    def _path_part(self, expr: str | None, default: str = "") -> list[Target]:
+        """Targets for one part of a path; an unknown part is shown as ``<expression>``.
+
+        An empty string (Bedrock's "use the default") becomes ``default``, marked Partly.
+        """
         if expr is None:
             return []
+        if default and self._single(expr) == "":
+            return [Target(default, RES_PARTLY)]
         out = []
         for target in self._resolve(expr):
             if target.resolution == RES_RUNTIME:
